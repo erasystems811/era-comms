@@ -47,11 +47,15 @@ services:
       redis-server
       --appendonly yes
       --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    # Expose password as env var so the CMD-SHELL healthcheck can read it
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
     volumes:
       - redis_data:/data
     healthcheck:
       <<: *hc
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      # CMD array does not expand shell variables — must use CMD-SHELL
+      test: ["CMD-SHELL", "redis-cli -a $REDIS_PASSWORD ping"]
     networks: [era]
 
   # ── VOICE ─────────────────────────────────────────────────────
@@ -71,7 +75,8 @@ services:
       - freeswitch_data:/var/lib/freeswitch
     healthcheck:
       <<: *hc
-      test: ["CMD", "fs_cli", "-x", "status"]
+      # -p is required — our event_socket.conf.xml sets password "ClueCon"
+      test: ["CMD", "fs_cli", "-p", "ClueCon", "-x", "status"]
     networks: [era]
 
   coqui-tts:
@@ -84,7 +89,10 @@ services:
       - tts_models:/root/.local/share/tts
     healthcheck:
       <<: *hc
-      test: ["CMD", "curl", "-sf", "http://localhost:5002/api/tts?text=test"]
+      # curl is not in the Python container — use stdlib socket for TCP reachability
+      test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 5002)); s.close()'"]
+      # XTTS v2 downloads ~2 GB on first run — give it plenty of time
+      start_period: 300s
     networks: [era]
 
   # ── OBSERVABILITY ─────────────────────────────────────────────
