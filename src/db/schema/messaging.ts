@@ -99,9 +99,10 @@ export interface MessageEvent {
 // ── WEBHOOK EVENTS AND DELIVERIES ────────────────────────────
 
 export type WebhookEventType =
-  | 'message.sent'
-  | 'message.delivered'
-  | 'message.read'
+  | 'message.inbound'        // contact sent a message to ERA Comms
+  | 'message.sent'           // outbound message accepted by WhatsApp
+  | 'message.delivered'      // delivery receipt from WhatsApp
+  | 'message.read'           // read receipt from WhatsApp
   | 'message.failed'
   | 'conversation.escalated'
   | 'conversation.resumed'

@@ -9,6 +9,8 @@ import { ERAError } from '../shared/errors.js'
 import { authHook } from './middleware/auth.js'
 import healthRoutes from './routes/health.js'
 import sessionRoutes from './routes/sessions.js'
+import messagesRoutes from './routes/messages.js'
+import webhooksRoutes from './routes/webhooks.js'
 import './types.js'
 
 export async function buildServer(supervisor: ISessionSupervisor) {
@@ -71,6 +73,8 @@ export async function buildServer(supervisor: ISessionSupervisor) {
     async (v1) => {
       v1.addHook('preHandler', authHook)
       await v1.register(sessionRoutes, { prefix: '/sessions' })
+    await v1.register(messagesRoutes, { prefix: '/messages' })
+    await v1.register(webhooksRoutes, { prefix: '/webhooks' })
     },
     { prefix: '/v1' },
   )

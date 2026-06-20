@@ -3,6 +3,8 @@ import { config } from './shared/config.js'
 import { logger } from './shared/logger.js'
 import { SessionSupervisor } from './sessions/supervisor.js'
 import { buildServer } from './api/server.js'
+import { startInboundWorker } from './workers/inbound-worker.js'
+import { startWebhookWorker } from './workers/webhook-worker.js'
 
 async function main(): Promise<void> {
   logger.info({ env: config.env }, 'ERA Comms starting')
@@ -11,6 +13,10 @@ async function main(): Promise<void> {
   // PostgreSQL and spawns a worker process for each one.
   const supervisor = new SessionSupervisor()
   await supervisor.start()
+
+  // Start background workers
+  const inboundWorker = startInboundWorker()
+  const webhookWorker = startWebhookWorker()
 
   // Build and start the Fastify API server
   const app = await buildServer(supervisor)
@@ -28,6 +34,8 @@ async function main(): Promise<void> {
     logger.info({ signal }, 'Shutting down ERA Comms')
 
     await app.close()
+    await inboundWorker.close()
+    await webhookWorker.close()
     await supervisor.stop()
 
     logger.info('ERA Comms stopped')

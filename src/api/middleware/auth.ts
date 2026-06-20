@@ -16,8 +16,6 @@ type KeyRow = {
   id: string
   client_id: string
   scopes: string[]
-  revoked_at: string | null
-  expires_at: string | null
   client_type: string
 }
 
@@ -40,24 +38,21 @@ export async function authHook(req: FastifyRequest, _reply: FastifyReply): Promi
   if (count === 1) await redis.expire(rlKey, RATE_LIMIT_WINDOW_S * 2)
   if (count > RATE_LIMIT_MAX) throw new RateLimitError(RATE_LIMIT_WINDOW_S)
 
+  // Filter active keys only — avoids leaking whether a revoked key existed
   const rows = (await adminDb`
     SELECT ak.id,
            ak.client_id,
            ak.scopes,
-           ak.revoked_at,
-           ak.expires_at,
            c.type AS client_type
     FROM   api_keys ak
     JOIN   clients  c ON c.id = ak.client_id
-    WHERE  ak.key_hash = ${keyHash}
+    WHERE  ak.key_hash  = ${keyHash}
+      AND  ak.status    = 'active'
+      AND  (ak.expires_at IS NULL OR ak.expires_at > NOW())
   `) as unknown as KeyRow[]
 
   const key = rows[0]
   if (!key) throw new AuthenticationError()
-  if (key.revoked_at) throw new AuthenticationError('API key has been revoked')
-  if (key.expires_at && new Date(key.expires_at) < new Date()) {
-    throw new AuthenticationError('API key has expired')
-  }
 
   req.clientId = key.client_id
   req.apiKeyId = key.id
