@@ -5,6 +5,7 @@ import { SessionSupervisor } from './sessions/supervisor.js'
 import { buildServer } from './api/server.js'
 import { startInboundWorker } from './workers/inbound-worker.js'
 import { startWebhookWorker } from './workers/webhook-worker.js'
+import { startAIWorker } from './workers/ai-worker.js'
 
 async function main(): Promise<void> {
   logger.info({ env: config.env }, 'ERA Comms starting')
@@ -17,6 +18,7 @@ async function main(): Promise<void> {
   // Start background workers
   const inboundWorker = startInboundWorker()
   const webhookWorker = startWebhookWorker()
+  const aiWorker      = startAIWorker()
 
   // Build and start the Fastify API server
   const app = await buildServer(supervisor)
@@ -36,6 +38,7 @@ async function main(): Promise<void> {
     await app.close()
     await inboundWorker.close()
     await webhookWorker.close()
+    await aiWorker.close()
     await supervisor.stop()
 
     logger.info('ERA Comms stopped')

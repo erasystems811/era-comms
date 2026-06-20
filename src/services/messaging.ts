@@ -119,6 +119,7 @@ export interface SendMessageOptions {
   contentType?: 'text' | 'image' | 'audio' | 'video' | 'document'
   conversationId?: string  // Pin to existing conversation, or find/create
   idempotencyKey?: string  // Client-supplied. Auto-generated if omitted.
+  aiGenerated?: boolean    // true for AI-authored replies — skips variation in worker
 }
 
 export interface SendMessageResult {
@@ -134,9 +135,10 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
     sessionId,
     to,
     content,
-    contentType = 'text',
+    contentType  = 'text',
     conversationId: requestedConvId,
     idempotencyKey,
+    aiGenerated  = false,
   } = opts
 
   const ikey = idempotencyKey ?? randomUUID()
@@ -223,11 +225,11 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
       INSERT INTO messages (
         conversation_id, client_id, session_id,
         direction, content, content_type,
-        idempotency_key, status, warmup_stage
+        idempotency_key, status, warmup_stage, ai_generated
       ) VALUES (
         ${convId}, ${clientId}, ${sessionId},
         'outbound', ${content}, ${contentType},
-        ${ikey}, 'queued', 'unrestricted'
+        ${ikey}, 'queued', 'unrestricted', ${aiGenerated}
       )
       RETURNING id
     `) as unknown as Array<{ id: string }>
@@ -252,7 +254,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
         content,
         contentType,
         conversationId: result.conversationId,
-        aiGenerated: false,
+        aiGenerated,
       },
       { removeOnComplete: true, removeOnFail: 100 },
     )

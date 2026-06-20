@@ -16,7 +16,7 @@ import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import { getOrProvisionProfileVersion } from '../services/messaging.js'
 import { QUEUE } from '../queues/definitions.js'
-import type { InboundMessageJob, WebhookDeliveryJob } from '../queues/definitions.js'
+import type { InboundMessageJob, WebhookDeliveryJob, AIConversationJob } from '../queues/definitions.js'
 
 const log = logger.child({ component: 'inbound-worker' })
 
@@ -28,10 +28,23 @@ type WebhookEndpointRow = {
 
 type DeliveryRow = { id: string }
 
+type ConvRow = { id: string; ai_active: boolean; total_turns: string }
+
+type TransactionResult = {
+  deliveryIds:      string[]
+  convId:           string
+  aiActive:         boolean
+  turnCount:        number
+  messageInserted:  boolean
+}
+
 export function startInboundWorker(): Worker<InboundMessageJob> {
-  // One Queue instance shared across all concurrent processor invocations.
-  // Creating it per-job would open a new Redis connection for every inbound message.
+  // Shared queue instances — one Redis connection each, reused across all
+  // concurrent processor invocations.
   const webhookQueue = new Queue<WebhookDeliveryJob>(QUEUE.webhooks, {
+    connection: { url: config.redis.url },
+  })
+  const aiQueue = new Queue<AIConversationJob>(QUEUE.ai, {
     connection: { url: config.redis.url },
   })
 
@@ -41,7 +54,7 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
 
     const profileVersionId = await getOrProvisionProfileVersion(msg.clientId)
 
-    const deliveryIds = await withClient(msg.clientId, async (tx) => {
+    const txResult = await withClient(msg.clientId, async (tx): Promise<TransactionResult> => {
       // Find or create contact
       const contactRows = (await tx`
         INSERT INTO contacts (client_id, phone_number)
@@ -54,18 +67,21 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
 
       const contactId: string = contactRows[0]!.id
 
-      // Find or create active conversation for this contact + session
+      // Find or create active conversation — include ai_active for AI job decision
       const convRows = (await tx`
-        SELECT id FROM conversations
+        SELECT id, ai_active, total_turns FROM conversations
         WHERE  contact_id = ${contactId}
           AND  session_id = ${msg.sessionId}
           AND  status     = 'active'
         ORDER BY created_at DESC LIMIT 1
-      `) as unknown as Array<{ id: string }>
+      `) as unknown as ConvRow[]
 
-      let convId: string
+      let convId:   string
+      let aiActive: boolean
+
       if (convRows[0]) {
-        convId = convRows[0].id
+        convId   = convRows[0].id
+        aiActive = convRows[0].ai_active
       } else {
         const newConv = (await tx`
           INSERT INTO conversations (
@@ -74,14 +90,15 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
             ${msg.clientId}, ${contactId}, ${msg.sessionId}, ${profileVersionId},
             'active', TRUE
           )
-          RETURNING id
-        `) as unknown as Array<{ id: string }>
-        convId = newConv[0]!.id
+          RETURNING id, ai_active, total_turns
+        `) as unknown as ConvRow[]
+        convId   = newConv[0]!.id
+        aiActive = newConv[0]!.ai_active
       }
 
-      // Insert message — idempotent on (client_id, idempotency_key)
-      // Use the WhatsApp message ID as the idempotency key for inbound messages.
-      await tx`
+      // Insert message — RETURNING id lets us detect ON CONFLICT DO NOTHING
+      // (empty result = duplicate; skip AI and webhooks for replays)
+      const msgRows = (await tx`
         INSERT INTO messages (
           conversation_id, client_id, session_id,
           direction, content, content_type, media_url,
@@ -92,15 +109,22 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
           ${msg.waMessageId}, ${msg.waMessageId}, 'delivered'
         )
         ON CONFLICT (client_id, idempotency_key) DO NOTHING
-      `
+        RETURNING id
+      `) as unknown as Array<{ id: string }>
 
-      // Update conversation turn count
-      await tx`
-        UPDATE conversations
-        SET total_turns = total_turns + 1,
-            updated_at  = NOW()
-        WHERE id = ${convId}
-      `
+      const messageInserted = msgRows.length > 0
+
+      let turnCount = 0
+      if (messageInserted) {
+        const updRows = (await tx`
+          UPDATE conversations
+          SET total_turns = total_turns + 1,
+              updated_at  = NOW()
+          WHERE id = ${convId}
+          RETURNING total_turns
+        `) as unknown as Array<{ total_turns: string }>
+        turnCount = parseInt(updRows[0]?.total_turns ?? '1', 10)
+      }
 
       // Find subscribed webhook endpoints for 'message.inbound'
       const endpoints = (await tx`
@@ -110,39 +134,39 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
           AND 'message.inbound' = ANY(events)
       `) as unknown as WebhookEndpointRow[]
 
-      if (endpoints.length === 0) return []
+      const deliveryIds: string[] = []
 
-      // Build the webhook payload once (same for all endpoints)
-      const payload = {
-        event: 'message.inbound',
-        data: {
-          sessionId:     msg.sessionId,
-          from:          msg.from,
-          content:       msg.content,
-          contentType:   msg.contentType,
-          mediaUrl:      msg.mediaUrl ?? null,
-          waMessageId:   msg.waMessageId,
-          conversationId: convId,
-          timestamp:     msg.timestamp,
-        },
+      if (messageInserted && endpoints.length > 0) {
+        const payload = {
+          event: 'message.inbound',
+          data: {
+            sessionId:      msg.sessionId,
+            from:           msg.from,
+            content:        msg.content,
+            contentType:    msg.contentType,
+            mediaUrl:       msg.mediaUrl ?? null,
+            waMessageId:    msg.waMessageId,
+            conversationId: convId,
+            timestamp:      msg.timestamp,
+          },
+        }
+
+        for (const ep of endpoints) {
+          const dRows = (await tx`
+            INSERT INTO webhook_deliveries (endpoint_id, client_id, event_type, payload)
+            VALUES (${ep.id}, ${msg.clientId}, 'message.inbound', ${JSON.stringify(payload)}::jsonb)
+            RETURNING id
+          `) as unknown as DeliveryRow[]
+          if (dRows[0]) deliveryIds.push(dRows[0].id)
+        }
       }
 
-      // Insert delivery records and collect their IDs
-      const ids: string[] = []
-      for (const ep of endpoints) {
-        const dRows = (await tx`
-          INSERT INTO webhook_deliveries (endpoint_id, client_id, event_type, payload)
-          VALUES (${ep.id}, ${msg.clientId}, 'message.inbound', ${JSON.stringify(payload)}::jsonb)
-          RETURNING id
-        `) as unknown as DeliveryRow[]
-
-        if (dRows[0]) ids.push(dRows[0].id)
-      }
-
-      return ids
+      return { deliveryIds, convId, aiActive, turnCount, messageInserted }
     })
 
-    // Enqueue webhook jobs after transaction commits — guarantees records exist
+    const { deliveryIds, convId, aiActive, turnCount, messageInserted } = txResult
+
+    // Enqueue webhook jobs after transaction commits
     if (deliveryIds.length > 0) {
       await Promise.all(
         deliveryIds.map((deliveryId) =>
@@ -152,6 +176,23 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
             { attempts: 10, backoff: { type: 'exponential', delay: 5_000 }, removeOnComplete: true },
           ),
         ),
+      )
+    }
+
+    // Enqueue AI job when the message was new and the conversation has AI active.
+    // The AI worker decides whether to respond (checks ai_active, escalation status, etc.).
+    if (messageInserted && aiActive) {
+      const contextTokens = Math.ceil(msg.content.length / 4)
+      await aiQueue.add(
+        'ai',
+        {
+          conversationId: convId,
+          clientId:       msg.clientId,
+          messageId:      msg.waMessageId,
+          turnCount,
+          contextTokens,
+        },
+        { attempts: 3, backoff: { type: 'exponential', delay: 10_000 }, removeOnComplete: true },
       )
     }
   }
