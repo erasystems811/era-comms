@@ -170,24 +170,22 @@ Return live health information for one session.
 ```json
 {
   "sessionId": "018f4a2c-3d1e-7b9a-8f2c-1a2b3c4d5e6f",
-  "status": "connected",
   "phoneNumber": "+2348012345678",
-  "role": "primary",
-  "uptime": 86400,
-  "messagesSent": 1250,
-  "lastActivity": "2026-06-21T10:45:00.000Z"
+  "status": "connected",
+  "riskScore": 0.05,
+  "lastHeartbeatAt": "2026-06-21T10:45:00.000Z",
+  "messagesSentTotal": 1250
 }
 ```
 
 **`status` values**
 
-| Value          | Meaning                                       |
-| -------------- | --------------------------------------------- |
-| `pending_qr`   | Awaiting QR scan to pair the device           |
-| `connecting`   | QR scanned, establishing WebSocket            |
-| `connected`    | Active and ready to send/receive messages     |
-| `disconnected` | Connection lost, supervisor is reconnecting   |
-| `banned`       | Number banned by WhatsApp — cannot recover    |
+The health endpoint surfaces two values only. Internal DB states (`pending_qr`, `connecting`, `banned`) are not exposed here.
+
+| Value          | Meaning                                                          |
+| -------------- | ---------------------------------------------------------------- |
+| `connected`    | Session is active and can send/receive messages                  |
+| `disconnected` | Session is not active (pending QR, reconnecting, or banned)      |
 
 **Error 404** — session not found or belongs to another client
 
@@ -195,7 +193,7 @@ Return live health information for one session.
 
 ### DELETE /v1/sessions/:id
 
-Stop and permanently deregister a session. The session process is terminated and the database record is removed.
+Stop a running session. The session worker process is terminated. The database record is retained — the session can be restarted by starting a new worker (contact ERA Systems support) or re-creating if needed.
 
 **Response 204** — no content
 
@@ -394,13 +392,14 @@ ERA Comms delivers real-time events (inbound messages, status updates, session e
 Every delivery is an HTTP `POST` to the registered URL with:
 
 ```
-Content-Type: application/json
-X-ERA-Event: <event-type>
-X-ERA-Delivery: <uuid>
+Content-Type:    application/json
+X-ERA-Event:     <event-type>
+X-ERA-Delivery-ID: <uuid>
 X-ERA-Signature: sha256=<hmac-hex>
+X-ERA-Timestamp: <unix-epoch-seconds>
 ```
 
-The signature is `HMAC-SHA256(rawBody, webhookSecret)`. Always verify it before processing.
+The signature is `HMAC-SHA256(rawBody, webhookSecret)`. Always verify it before processing. Use `X-ERA-Timestamp` to reject replays older than a few minutes.
 
 **Event types**
 
@@ -518,7 +517,7 @@ Inspect recent delivery attempts for a webhook endpoint.
     "status": "dead_lettered",
     "attempts": 9,
     "responseStatus": 503,
-    "lastAttemptAt": "2026-06-21T34:46:13.000Z",
+    "lastAttemptAt": "2026-06-22T10:46:13.000Z",
     "createdAt": "2026-06-21T10:50:00.000Z"
   }
 ]
@@ -683,7 +682,7 @@ Issue a new API key for a client.
 ```json
 {
   "id": "02cd3e4f-5a6b-7c8d-9e0f-1a2b3c4d5e6f",
-  "key": "era_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2",
+  "key": "era_a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6",
   "keyPrefix": "era_a1b2c3d4",
   "scopes": ["messaging", "admin"],
   "environment": "live",
