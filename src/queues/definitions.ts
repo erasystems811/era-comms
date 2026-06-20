@@ -20,6 +20,7 @@ export const QUEUE = {
 export const CHANNEL = {
   sessionStatus: (sessionId: string) => `session:${sessionId}:status`,
   sessionCommand: (sessionId: string) => `session:${sessionId}:commands`,
+  sessionQR: (sessionId: string) => `session:${sessionId}:qr`,
 } as const
 
 // ── REDIS KEYS ────────────────────────────────────────────────

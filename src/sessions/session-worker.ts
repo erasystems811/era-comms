@@ -20,6 +20,7 @@ import {
   HEARTBEAT_TTL_SECONDS,
   HEARTBEAT_INTERVAL_MS,
 } from '../queues/definitions.js'
+
 import type {
   OutboundMessageJob,
   InboundMessageJob,
@@ -114,6 +115,18 @@ async function start(): Promise<void> {
 
   await publishStatus({ status: 'connecting' })
   await session.connect()
+
+  // Publish QR codes to Redis so the API WebSocket can forward them.
+  // The generator yields until the session connects or fails — then closes.
+  void (async () => {
+    try {
+      for await (const event of session.qrStream()) {
+        await generalRedis.publish(CHANNEL.sessionQR(SESSION_ID), JSON.stringify(event))
+      }
+    } catch {
+      // Generator closed — session connected or terminated
+    }
+  })()
 
   // ── HEARTBEAT ─────────────────────────────────────────────────
 
