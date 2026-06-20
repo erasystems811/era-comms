@@ -60,8 +60,10 @@ export class RateLimitError extends ERAError {
 
 // 429 — client has exhausted their plan message cap
 export class PlanLimitError extends ERAError {
+  readonly limitType: 'hourly' | 'daily' | 'monthly'
   constructor(limitType: 'hourly' | 'daily' | 'monthly') {
     super('PLAN_LIMIT_EXCEEDED', `${limitType} message limit reached`, 429)
+    this.limitType = limitType
     this.name = 'PlanLimitError'
   }
 }

@@ -1,4 +1,5 @@
 import 'dotenv/config'
+import { Queue } from 'bullmq'
 import { config } from './shared/config.js'
 import { logger } from './shared/logger.js'
 import { SessionSupervisor } from './sessions/supervisor.js'
@@ -7,6 +8,8 @@ import { startInboundWorker } from './workers/inbound-worker.js'
 import { startWebhookWorker } from './workers/webhook-worker.js'
 import { startAIWorker } from './workers/ai-worker.js'
 import { startAnalyticsWorker } from './workers/analytics-worker.js'
+import { queueDepth } from './observability/metrics.js'
+import { QUEUE } from './queues/definitions.js'
 
 async function main(): Promise<void> {
   logger.info({ env: config.env }, 'ERA Comms starting')
@@ -33,10 +36,29 @@ async function main(): Promise<void> {
     process.exit(1)
   }
 
+  // Queue depth poller — updates Prometheus gauges every 30 s
+  const polledQueues = [
+    new Queue(QUEUE.inbound,   { connection: { url: config.redis.url } }),
+    new Queue(QUEUE.webhooks,  { connection: { url: config.redis.url } }),
+    new Queue(QUEUE.ai,        { connection: { url: config.redis.url } }),
+    new Queue(QUEUE.analytics, { connection: { url: config.redis.url } }),
+  ]
+  const pollDepths = async (): Promise<void> => {
+    for (const q of polledQueues) {
+      try {
+        queueDepth.set({ queue: q.name }, await q.getWaitingCount())
+      } catch { /* transient Redis hiccup — skip */ }
+    }
+  }
+  void pollDepths()
+  const depthPoller = setInterval(() => void pollDepths(), 30_000)
+
   // Graceful shutdown
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Shutting down ERA Comms')
 
+    clearInterval(depthPoller)
+    await Promise.all(polledQueues.map((q) => q.close()))
     await app.close()
     await inboundWorker.close()
     await webhookWorker.close()

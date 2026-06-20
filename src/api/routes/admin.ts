@@ -26,7 +26,8 @@ import { NotFoundError } from '../../shared/errors.js'
 // ── Auth guard ────────────────────────────────────────────────
 
 function assertOperator(req: FastifyRequest, reply: FastifyReply): boolean {
-  const secret = req.headers['x-operator-secret']
+  const raw    = req.headers['x-operator-secret']
+  const secret = Array.isArray(raw) ? raw[0] : raw
   if (!secret || secret !== config.operatorSecret) {
     void reply.status(401).send({ error: 'UNAUTHORIZED', message: 'Invalid operator secret' })
     return false

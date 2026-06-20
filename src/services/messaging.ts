@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 import { Queue } from 'bullmq'
 import { adminDb, withClient } from '../db/client.js'
 import { config } from '../shared/config.js'
-import { NotFoundError, SessionError } from '../shared/errors.js'
+import { NotFoundError, SessionError, PlanLimitError } from '../shared/errors.js'
 import { checkMessagePlanLimits } from './plan.js'
+import { messagesQueuedTotal, messagesPlanRejectedTotal } from '../observability/metrics.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { OutboundMessageJob } from '../queues/definitions.js'
 
@@ -145,7 +146,14 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
   const ikey = idempotencyKey ?? randomUUID()
 
   // Fail fast before any DB writes if plan cap is hit
-  await checkMessagePlanLimits(clientId)
+  try {
+    await checkMessagePlanLimits(clientId)
+  } catch (err) {
+    if (err instanceof PlanLimitError) {
+      messagesPlanRejectedTotal.inc({ client_id: clientId, limit_type: err.limitType })
+    }
+    throw err
+  }
 
   // Provision profile version before the main transaction (idempotent, separate tx)
   const profileVersionId = await getOrProvisionProfileVersion(clientId)
@@ -248,6 +256,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
 
   // Enqueue AFTER the transaction commits — the worker reads the message record
   if (!result.idempotent) {
+    messagesQueuedTotal.inc({ client_id: clientId })
     await getOutboundQueue(sessionId).add(
       'outbound',
       {

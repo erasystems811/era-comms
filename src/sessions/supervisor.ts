@@ -6,6 +6,8 @@ import { adminDb } from '../db/client.js'
 import { redis } from '../db/redis.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
+import { activeSessions, sessionBansTotal } from '../observability/metrics.js'
+import { sendOperatorAlert } from '../observability/alerts.js'
 import {
   KEY,
   CHANNEL,
@@ -112,10 +114,12 @@ export class SessionSupervisor implements ISessionSupervisor {
     }
 
     this.workers.set(sessionId, state)
+    activeSessions.set(this.workers.size)
 
     proc.on('exit', (code, signal) => {
       logger.warn({ sessionId, code, signal }, 'Session worker exited')
       this.workers.delete(sessionId)
+      activeSessions.set(this.workers.size)
 
       if (!state.stopped) {
         void this.handleCrash(sessionId, code)
@@ -255,6 +259,9 @@ export class SessionSupervisor implements ISessionSupervisor {
       const worker = this.workers.get(sessionId)
       if (worker) worker.stopped = true
 
+      sessionBansTotal.inc()
+      void sendOperatorAlert(`Session ${sessionId} has been permanently banned by WhatsApp. Replace the number.`)
+
       // Check if this client has a backup number to activate
       await this.activateBackupIfAvailable(sessionId)
     }
@@ -278,6 +285,7 @@ export class SessionSupervisor implements ISessionSupervisor {
         { primarySessionId },
         'Primary banned with no backup available — operator action required',
       )
+      void sendOperatorAlert(`Session ${primarySessionId} banned with NO backup available. Manual operator action required.`)
       return
     }
 

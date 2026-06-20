@@ -11,6 +11,7 @@ import type { Job } from 'bullmq'
 import { adminDb } from '../db/client.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
+import { webhookDeliveriesTotal } from '../observability/metrics.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { WebhookDeliveryJob } from '../queues/definitions.js'
 
@@ -96,6 +97,7 @@ async function processWebhook(job: Job<WebhookDeliveryJob>): Promise<void> {
           response_body    = ${responseBody}
       WHERE id = ${deliveryId}
     `
+    webhookDeliveriesTotal.inc({ status: 'delivered' })
     log.debug({ deliveryId, status: responseStatus }, 'Webhook delivered')
   } else {
     await adminDb`
@@ -107,6 +109,7 @@ async function processWebhook(job: Job<WebhookDeliveryJob>): Promise<void> {
           status          = 'failed'
       WHERE id = ${deliveryId}
     `
+    webhookDeliveriesTotal.inc({ status: 'failed' })
     throw new Error(`Webhook delivery failed — HTTP ${responseStatus ?? 'no response'}`)
   }
 }
@@ -120,6 +123,7 @@ async function onFailed(job: Job<WebhookDeliveryJob> | undefined): Promise<void>
   await adminDb`
     UPDATE webhook_deliveries SET status = 'dead_lettered' WHERE id = ${deliveryId}
   `
+  webhookDeliveriesTotal.inc({ status: 'dead_lettered' })
   log.warn({ deliveryId }, 'Webhook delivery dead-lettered after all retries')
 }
 

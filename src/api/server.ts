@@ -12,6 +12,7 @@ import sessionRoutes from './routes/sessions.js'
 import messagesRoutes from './routes/messages.js'
 import webhooksRoutes from './routes/webhooks.js'
 import adminRoutes from './routes/admin.js'
+import metricsRoute from './routes/metrics-route.js'
 import './types.js'
 
 export async function buildServer(supervisor: ISessionSupervisor) {
@@ -82,6 +83,9 @@ export async function buildServer(supervisor: ISessionSupervisor) {
 
   // Operator admin — X-Operator-Secret auth handled inside each route handler
   await app.register(adminRoutes, { prefix: '/v1/admin' })
+
+  // Prometheus scrape endpoint — no auth (controlled at network level)
+  await app.register(metricsRoute)
 
   return app
 }

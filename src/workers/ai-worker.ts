@@ -21,6 +21,7 @@ import { sendMessage } from '../services/messaging.js'
 import { buildConversationContext } from '../ai/context.js'
 import { taskClassifier } from '../ai/classifier.js'
 import { aiRouter } from '../ai/router.js'
+import { aiResponseDurationSeconds, aiEscalationsTotal } from '../observability/metrics.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { AIConversationJob, WebhookDeliveryJob, AnalyticsJob } from '../queues/definitions.js'
 
@@ -109,6 +110,7 @@ async function processAI(job: { data: AIConversationJob }): Promise<void> {
 
   if (ctx.signals.hasEscalationKeywords) {
     log.info({ conversationId }, 'Escalation trigger detected — escalating')
+    aiEscalationsTotal.inc({ client_id: clientId })
     await escalateConversation(
       conversationId,
       clientId,
@@ -131,11 +133,16 @@ async function processAI(job: { data: AIConversationJob }): Promise<void> {
   let inputTokens  = 0
   let outputTokens = 0
 
+  const aiStart = Date.now()
   try {
     const result = await provider.complete(ctx.messages, {
       maxTokens:   500,
       temperature: 0.7,
     })
+    aiResponseDurationSeconds.observe(
+      { provider_id: provider.providerId, task_type: taskType },
+      (Date.now() - aiStart) / 1000,
+    )
     aiResponse   = result.content.trim()
     aiModel      = result.model
     inputTokens  = result.inputTokens

@@ -15,6 +15,7 @@ import { withClient } from '../db/client.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import { getOrProvisionProfileVersion } from '../services/messaging.js'
+import { messagesInboundTotal } from '../observability/metrics.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { InboundMessageJob, WebhookDeliveryJob, AIConversationJob } from '../queues/definitions.js'
 
@@ -165,6 +166,10 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
     })
 
     const { deliveryIds, convId, aiActive, turnCount, messageInserted } = txResult
+
+    if (messageInserted) {
+      messagesInboundTotal.inc({ session_id: msg.sessionId })
+    }
 
     // Enqueue webhook jobs after transaction commits
     if (deliveryIds.length > 0) {
