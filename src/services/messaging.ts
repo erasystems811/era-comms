@@ -89,6 +89,26 @@ export async function getOrProvisionProfileVersion(clientId: string): Promise<st
   }) as Promise<string>
 }
 
+// ── OUTBOUND QUEUE CACHE ──────────────────────────────────────
+//
+// One Queue instance per sessionId — each holds one Redis connection.
+// Creating a new Queue per sendMessage() call would leak connections
+// (same issue fixed in inbound-worker). Sessions are rarely removed,
+// so we never need to evict from this map.
+
+const outboundQueues = new Map<string, Queue<OutboundMessageJob>>()
+
+function getOutboundQueue(sessionId: string): Queue<OutboundMessageJob> {
+  let q = outboundQueues.get(sessionId)
+  if (!q) {
+    q = new Queue<OutboundMessageJob>(QUEUE.outbound(sessionId), {
+      connection: { url: config.redis.url },
+    })
+    outboundQueues.set(sessionId, q)
+  }
+  return q
+}
+
 // ── SEND MESSAGE ──────────────────────────────────────────────
 
 export interface SendMessageOptions {
@@ -222,10 +242,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
 
   // Enqueue AFTER the transaction commits — the worker reads the message record
   if (!result.idempotent) {
-    const queue = new Queue<OutboundMessageJob>(QUEUE.outbound(sessionId), {
-      connection: { url: config.redis.url },
-    })
-    await queue.add(
+    await getOutboundQueue(sessionId).add(
       'outbound',
       {
         messageId: result.messageId,
