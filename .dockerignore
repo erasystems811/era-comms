@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+!.env.staging.example
+node_modules
+dist
+tests
+*.log
+docker
+infra/grafana

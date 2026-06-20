@@ -1,0 +1,162 @@
+version: '3.9'
+
+# ── ERA COMMS STAGING STACK ────────────────────────────────────
+#
+# Usage:
+#   cp .env.staging.example .env.staging
+#   # fill in secrets
+#   docker compose -f docker/docker-compose.staging.yml --env-file .env.staging up -d
+#
+# Services:
+#   postgres     — TimescaleDB (PostgreSQL 15)
+#   redis        — BullMQ queues + Redis counters
+#   freeswitch   — Voice call routing (ESL inbound on :8021)
+#   coqui-tts    — XTTS v2 voice synthesis on :5002
+#   prometheus   — Metrics collection (scrapes era-comms:3000/metrics)
+#   grafana      — Dashboards on :3001
+#   era-comms    — The application (migrates DB then starts)
+
+x-healthcheck-defaults: &hc
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 30s
+
+services:
+
+  # ── INFRASTRUCTURE ────────────────────────────────────────────
+
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       era_comms
+      POSTGRES_USER:     era_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "pg_isready -U era_app -d era_comms"]
+    networks: [era]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+    networks: [era]
+
+  # ── VOICE ─────────────────────────────────────────────────────
+
+  freeswitch:
+    image: signalwire/freeswitch:1.10
+    restart: unless-stopped
+    ports:
+      - "5060:5060/udp"    # SIP
+      - "5060:5060/tcp"    # SIP
+      - "5080:5080/udp"    # SIP alt
+      - "16384-16484:16384-16484/udp"  # RTP media
+    volumes:
+      # Mount individual overrides — the image keeps its default config elsewhere
+      - ./freeswitch/event_socket.conf.xml:/etc/freeswitch/autoload_configs/event_socket.conf.xml:ro
+      - ./freeswitch/dialplan.xml:/etc/freeswitch/dialplan/default.xml:ro
+      - freeswitch_data:/var/lib/freeswitch
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "fs_cli", "-x", "status"]
+    networks: [era]
+
+  coqui-tts:
+    image: ghcr.io/coqui-ai/tts:latest
+    restart: unless-stopped
+    command: >
+      --model_name tts_models/multilingual/multi-dataset/xtts_v2
+      --use_cuda false
+    volumes:
+      - tts_models:/root/.local/share/tts
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-sf", "http://localhost:5002/api/tts?text=test"]
+    networks: [era]
+
+  # ── OBSERVABILITY ─────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    restart: unless-stopped
+    volumes:
+      - ../infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=30d"
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/-/healthy"]
+    networks: [era]
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?GRAFANA_PASSWORD is required}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_ROOT_URL:   "%(protocol)s://%(domain)s:%(http_port)s/"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ../infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../infra/grafana/era-comms-dashboard.json:/var/lib/grafana/dashboards/era-comms.json:ro
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/health"]
+    networks: [era]
+
+  # ── APPLICATION ───────────────────────────────────────────────
+
+  era-comms:
+    image: ${ERA_IMAGE:-ghcr.io/erasystems811/era-comms:latest}
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file: ../.env.staging
+    environment:
+      DATABASE_URL: >-
+        postgresql://era_app:${POSTGRES_PASSWORD}@postgres:5432/era_comms
+      REDIS_URL:    redis://:${REDIS_PASSWORD}@redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+    networks: [era]
+    volumes:
+      - voice_audio:/tmp/era-voice
+
+volumes:
+  postgres_data:
+  redis_data:
+  freeswitch_data:
+  tts_models:
+  prometheus_data:
+  grafana_data:
+  voice_audio:
+
+networks:
+  era:
+    driver: bridge

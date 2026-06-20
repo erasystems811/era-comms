@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  ERA Comms staging dialplan.
+  All inbound calls are parked (FreeSWITCH answers and holds the channel).
+  ERA Comms connects via ESL inbound mode, receives CHANNEL_CREATE, and
+  drives the call using sendmsg commands (answer, playback, record, etc.).
+-->
+<include>
+  <context name="default">
+    <extension name="era-comms">
+      <condition field="destination_number" expression="^(.+)$">
+        <action application="park"/>
+      </condition>
+    </extension>
+  </context>
+</include>

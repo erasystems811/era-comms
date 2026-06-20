@@ -1,0 +1,59 @@
+name: Deploy to Staging
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest
+    # Only deploy when CI passed
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:     ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key:      ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -euo pipefail
+
+            cd /opt/era-comms
+
+            # Pull the new image
+            echo "${{ secrets.GITHUB_TOKEN }}" | \
+              docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            docker pull ghcr.io/erasystems811/era-comms:${{ github.sha }}
+
+            # Pin the compose to the exact SHA so rollback is trivial
+            export ERA_IMAGE=ghcr.io/erasystems811/era-comms:${{ github.sha }}
+
+            docker compose \
+              -f docker/docker-compose.staging.yml \
+              --env-file .env.staging \
+              up -d --remove-orphans
+
+            # Wait for health check
+            echo "Waiting for era-comms to become healthy..."
+            for i in $(seq 1 24); do
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' \
+                $(docker compose -f docker/docker-compose.staging.yml ps -q era-comms) 2>/dev/null || echo "unknown")
+              if [ "$STATUS" = "healthy" ]; then
+                echo "Healthy after ${i}x10s"
+                exit 0
+              fi
+              echo "  ${i}/24 — ${STATUS}"
+              sleep 10
+            done
+
+            echo "ERROR: era-comms did not become healthy in 240s"
+            docker compose -f docker/docker-compose.staging.yml logs era-comms --tail=50
+            exit 1
