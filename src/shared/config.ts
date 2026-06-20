@@ -43,6 +43,7 @@ const schema = z.object({
 
   TTS_SERVICE_URL: z.string().url().default('http://localhost:5002'),
   DEEPGRAM_API_KEY: z.string().optional(),
+  VOICE_AUDIO_DIR: z.string().default('/tmp/era-voice'),
 })
 
 const result = schema.safeParse(process.env)
@@ -110,6 +111,7 @@ export const config = Object.freeze({
       serviceUrl: env.TTS_SERVICE_URL,
     },
     deepgramApiKey: env.DEEPGRAM_API_KEY,
+    audioDir: env.VOICE_AUDIO_DIR,
   },
 })
 

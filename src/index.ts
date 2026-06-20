@@ -8,6 +8,7 @@ import { startInboundWorker } from './workers/inbound-worker.js'
 import { startWebhookWorker } from './workers/webhook-worker.js'
 import { startAIWorker } from './workers/ai-worker.js'
 import { startAnalyticsWorker } from './workers/analytics-worker.js'
+import { CallSupervisor } from './voice/call-supervisor.js'
 import { queueDepth } from './observability/metrics.js'
 import { QUEUE } from './queues/definitions.js'
 
@@ -24,6 +25,10 @@ async function main(): Promise<void> {
   const webhookWorker   = startWebhookWorker()
   const aiWorker        = startAIWorker()
   const analyticsWorker = startAnalyticsWorker()
+
+  // Start voice subsystem — connects to FreeSWITCH ESL
+  const callSupervisor = new CallSupervisor()
+  await callSupervisor.start()
 
   // Build and start the Fastify API server
   const app = await buildServer(supervisor)
@@ -59,6 +64,7 @@ async function main(): Promise<void> {
 
     clearInterval(depthPoller)
     await Promise.all(polledQueues.map((q) => q.close()))
+    callSupervisor.stop()
     await app.close()
     await inboundWorker.close()
     await webhookWorker.close()

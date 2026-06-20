@@ -130,8 +130,8 @@
       "gridPos": { "x": 0, "y": 20, "w": 12, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        { "expr": "era_nodejs_process_heap_bytes{type='used'}", "legendFormat": "heap used" },
-        { "expr": "era_nodejs_process_heap_bytes{type='total'}", "legendFormat": "heap total" }
+        { "expr": "era_nodejs_nodejs_heap_size_used_bytes", "legendFormat": "heap used" },
+        { "expr": "era_nodejs_nodejs_heap_size_total_bytes", "legendFormat": "heap total" }
       ],
       "fieldConfig": { "defaults": { "unit": "bytes" } }
     },
@@ -140,7 +140,8 @@
       "gridPos": { "x": 12, "y": 20, "w": 12, "h": 6 },
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "targets": [
-        { "expr": "rate(era_nodejs_eventloop_lag_seconds_sum[1m]) / rate(era_nodejs_eventloop_lag_seconds_count[1m])", "legendFormat": "mean lag" }
+        { "expr": "era_nodejs_nodejs_eventloop_lag_mean_seconds", "legendFormat": "mean lag" },
+        { "expr": "era_nodejs_nodejs_eventloop_lag_p99_seconds", "legendFormat": "p99 lag" }
       ],
       "fieldConfig": { "defaults": { "unit": "s" } }
     }
