@@ -17,14 +17,15 @@ export class AnthropicProvider implements IAIProvider {
   }
 
   // Anthropic's API separates the system prompt from the turn list.
-  // Extract the first system-role message; everything else is turns.
+  // context.ts may emit two system messages (profile prompt + summary);
+  // concatenate all system messages so neither is dropped.
   private splitMessages(messages: ChatMessage[]): {
     system:  string | undefined
     turns:   Array<{ role: 'user' | 'assistant'; content: string }>
   } {
-    const first  = messages[0]
-    const system = first?.role === 'system' ? first.content : undefined
-    const turns  = messages
+    const systemParts = messages.filter(m => m.role === 'system').map(m => m.content)
+    const system      = systemParts.length > 0 ? systemParts.join('\n\n') : undefined
+    const turns       = messages
       .filter(m => m.role !== 'system')
       .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
     return { system, turns }

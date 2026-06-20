@@ -17,6 +17,7 @@ import { calculateJitter } from '../anti-detection/jitter.js'
 import { checkWarmup, incrementDailyCount } from '../anti-detection/warmup.js'
 import { varyMessage } from '../anti-detection/variation.js'
 import { updateRiskScore } from '../anti-detection/risk.js'
+import { recordMessageSent } from '../services/plan.js'
 import {
   QUEUE,
   KEY,
@@ -212,8 +213,9 @@ async function start(): Promise<void> {
       try {
         const result = await session.sendMessage(to, finalContent)
 
-        // Increment warmup counter immediately after confirmed send
+        // Increment warmup counter and plan usage counters after confirmed send
         await incrementDailyCount(SESSION_ID)
+        await recordMessageSent(clientId)
 
         await adminDb`
           UPDATE messages
@@ -225,6 +227,13 @@ async function start(): Promise<void> {
               warmup_stage     = ${warmup.stage}
           WHERE id = ${messageId}
         `
+
+        // Write usage event directly — session worker is a child process
+        // and does not participate in the main-process BullMQ analytics queue.
+        void adminDb`
+          INSERT INTO usage_events (client_id, event_type, quantity, reference_id, occurred_at)
+          VALUES (${clientId}, 'message_sent', 1, ${messageId}::uuid, NOW())
+        `.catch((err: unknown) => workerLogger.warn({ err }, 'Usage event write failed'))
 
         // Risk score update is fire-and-forget — never block delivery
         void updateRiskScore(SESSION_ID).catch((err: unknown) =>

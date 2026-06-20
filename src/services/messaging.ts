@@ -3,6 +3,7 @@ import { Queue } from 'bullmq'
 import { adminDb, withClient } from '../db/client.js'
 import { config } from '../shared/config.js'
 import { NotFoundError, SessionError } from '../shared/errors.js'
+import { checkMessagePlanLimits } from './plan.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { OutboundMessageJob } from '../queues/definitions.js'
 
@@ -142,6 +143,9 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
   } = opts
 
   const ikey = idempotencyKey ?? randomUUID()
+
+  // Fail fast before any DB writes if plan cap is hit
+  await checkMessagePlanLimits(clientId)
 
   // Provision profile version before the main transaction (idempotent, separate tx)
   const profileVersionId = await getOrProvisionProfileVersion(clientId)

@@ -22,6 +22,9 @@ const schema = z.object({
     .string()
     .length(64, 'SESSION_CREDENTIALS_KEY must be 64 hex characters (32 bytes)'),
 
+  // Operator REST API secret — required for /v1/admin/* routes
+  OPERATOR_SECRET: z.string().min(32, 'OPERATOR_SECRET must be at least 32 characters'),
+
   // Operator alert destination
   ALERT_WHATSAPP_NUMBER: z.string().min(1, 'ALERT_WHATSAPP_NUMBER is required'),
 
@@ -83,6 +86,8 @@ export const config = Object.freeze({
     // Stored as hex string, exposed as Buffer for use with crypto module
     sessionCredentialsKey: Buffer.from(env.SESSION_CREDENTIALS_KEY, 'hex'),
   },
+
+  operatorSecret: env.OPERATOR_SECRET,
 
   monitoring: {
     alertWhatsappNumber: env.ALERT_WHATSAPP_NUMBER,

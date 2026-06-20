@@ -22,17 +22,16 @@ import { buildConversationContext } from '../ai/context.js'
 import { taskClassifier } from '../ai/classifier.js'
 import { aiRouter } from '../ai/router.js'
 import { QUEUE } from '../queues/definitions.js'
-import type { AIConversationJob, WebhookDeliveryJob } from '../queues/definitions.js'
+import type { AIConversationJob, WebhookDeliveryJob, AnalyticsJob } from '../queues/definitions.js'
 
 const log = logger.child({ component: 'ai-worker' })
 
 type WebhookEndpointRow = { id: string }
 type DeliveryRow        = { id: string }
 
-// Shared webhook queue — created once, not per-job
-const webhookQueue = new Queue<WebhookDeliveryJob>(QUEUE.webhooks, {
-  connection: { url: config.redis.url },
-})
+// Shared queues — created once, not per-job
+const webhookQueue   = new Queue<WebhookDeliveryJob>(QUEUE.webhooks,   { connection: { url: config.redis.url } })
+const analyticsQueue = new Queue<AnalyticsJob>(QUEUE.analytics,         { connection: { url: config.redis.url } })
 
 async function escalateConversation(
   conversationId: string,
@@ -127,16 +126,20 @@ async function processAI(job: { data: AIConversationJob }): Promise<void> {
 
   // ── GENERATE RESPONSE ───────────────────────────────────────
 
-  let aiResponse: string
-  let aiModel: string
+  let aiResponse:    string
+  let aiModel:       string
+  let inputTokens  = 0
+  let outputTokens = 0
 
   try {
     const result = await provider.complete(ctx.messages, {
       maxTokens:   500,
       temperature: 0.7,
     })
-    aiResponse = result.content.trim()
-    aiModel    = result.model
+    aiResponse   = result.content.trim()
+    aiModel      = result.model
+    inputTokens  = result.inputTokens
+    outputTokens = result.outputTokens
   } catch (err) {
     log.error({ conversationId, err }, 'AI provider call failed')
     throw err // let BullMQ retry
@@ -198,6 +201,22 @@ async function processAI(job: { data: AIConversationJob }): Promise<void> {
         updated_at    = NOW()
     WHERE id = ${conversationId}
   `
+
+  // ── ANALYTICS EVENTS ────────────────────────────────────────
+
+  const now = new Date().toISOString()
+  void Promise.all([
+    analyticsQueue.add('analytics', {
+      clientId, eventType: 'ai_turn', quantity: 1,
+      referenceId: conversationId, occurredAt: now,
+    }, { removeOnComplete: true }),
+    // Use result.inputTokens + result.outputTokens for token count
+    analyticsQueue.add('analytics', {
+      clientId, eventType: 'ai_tokens',
+      quantity: inputTokens + outputTokens,
+      referenceId: conversationId, occurredAt: now,
+    }, { removeOnComplete: true }),
+  ]).catch((err: unknown) => log.warn({ err }, 'Analytics enqueue failed'))
 
   log.debug({ conversationId, aiModel, taskType }, 'AI response sent')
 }
