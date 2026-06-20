@@ -113,6 +113,9 @@ async function processWebhook(job: Job<WebhookDeliveryJob>): Promise<void> {
 
 async function onFailed(job: Job<WebhookDeliveryJob> | undefined): Promise<void> {
   if (!job) return
+  // BullMQ fires 'failed' after every failed attempt, not just the last one.
+  // Only dead-letter when all retry attempts are exhausted.
+  if (job.attemptsMade < (job.opts.attempts ?? 1)) return
   const { deliveryId } = job.data
   await adminDb`
     UPDATE webhook_deliveries SET status = 'dead_lettered' WHERE id = ${deliveryId}

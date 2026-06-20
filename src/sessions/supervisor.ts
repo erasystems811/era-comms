@@ -3,6 +3,7 @@ import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Redis } from 'ioredis'
 import { adminDb } from '../db/client.js'
+import { redis } from '../db/redis.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import {
@@ -148,7 +149,7 @@ export class SessionSupervisor implements ISessionSupervisor {
   }
 
   async getHealth(sessionId: string): Promise<SessionHealth> {
-    const heartbeat = await new Redis(config.redis.url).get(KEY.sessionHeartbeat(sessionId))
+    const heartbeat = await redis.get(KEY.sessionHeartbeat(sessionId))
     const rows = await adminDb<Array<{
       phone_number: string
       status: string
@@ -306,7 +307,7 @@ export class SessionSupervisor implements ISessionSupervisor {
       const state = this.workers.get(sessionId)
       if (!state || state.stopped) continue
 
-      const alive = await new Redis(config.redis.url).get(KEY.sessionHeartbeat(sessionId))
+      const alive = await redis.get(KEY.sessionHeartbeat(sessionId))
       if (!alive) {
         logger.warn({ sessionId }, 'Heartbeat expired — session worker is dead')
         state.process.kill('SIGKILL')

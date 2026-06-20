@@ -205,9 +205,10 @@ async function start(): Promise<void> {
       lastPublishedStatus = current
       await publishStatus({
         status:
-          current === 'connected' ? 'connected'
-          : current === 'banned'  ? 'banned'
-          :                         'disconnected',
+          current === 'connected'    ? 'connected'
+          : current === 'banned'     ? 'banned'
+          : current === 'connecting' ? 'connecting'
+          :                           'disconnected',
       })
     }
   }, 5_000)

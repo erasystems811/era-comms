@@ -8,6 +8,15 @@ import { assertScope } from '../middleware/auth.js'
 
 const E164 = /^\+[1-9]\d{6,14}$/
 
+function isUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code: string }).code === '23505'
+  )
+}
+
 const sessionsRoutes: FastifyPluginAsync = async (app) => {
 
   // ── POST /v1/sessions — create and start a new session ─────
@@ -31,32 +40,31 @@ const sessionsRoutes: FastifyPluginAsync = async (app) => {
 
     const role: 'primary' | 'backup' = body.role === 'backup' ? 'backup' : 'primary'
 
-    // Check for duplicate number within this client (RLS enforced)
-    const existing = await withClient(req.clientId, async (tx) => {
-      return (await tx`
-        SELECT id FROM whatsapp_sessions WHERE phone_number = ${phoneNumber}
-      `) as unknown as Array<{ id: string }>
-    })
-
-    if (existing.length > 0) {
-      throw new ConflictError(`A session for ${phoneNumber} already exists`)
+    // Single transaction — eliminates the TOCTOU race between duplicate check and insert.
+    // The DB unique constraint on phone_number is the authoritative guard; we catch it here.
+    let session: { id: string } | undefined
+    try {
+      const rows = await withClient(req.clientId, async (tx) => {
+        return (await tx`
+          INSERT INTO whatsapp_sessions (client_id, phone_number, role, primary_session_id, status)
+          VALUES (
+            ${req.clientId},
+            ${phoneNumber},
+            ${role},
+            ${body.primarySessionId ?? null},
+            'pending_qr'
+          )
+          RETURNING id
+        `) as unknown as Array<{ id: string }>
+      })
+      session = rows[0]
+    } catch (err: unknown) {
+      if (isUniqueViolation(err)) {
+        throw new ConflictError(`A session for ${phoneNumber} already exists`)
+      }
+      throw err
     }
 
-    const inserted = await withClient(req.clientId, async (tx) => {
-      return (await tx`
-        INSERT INTO whatsapp_sessions (client_id, phone_number, role, primary_session_id, status)
-        VALUES (
-          ${req.clientId},
-          ${phoneNumber},
-          ${role},
-          ${body.primarySessionId ?? null},
-          'pending_qr'
-        )
-        RETURNING id
-      `) as unknown as Array<{ id: string }>
-    })
-
-    const session = inserted[0]
     if (!session) throw new Error('INSERT returned no rows')
 
     await req.server.supervisor.startSession(session.id)
@@ -136,7 +144,13 @@ const sessionsRoutes: FastifyPluginAsync = async (app) => {
     const ws = stream.socket
 
     void (async () => {
-      assertScope(req, 'admin')
+      try {
+        assertScope(req, 'admin')
+      } catch (err) {
+        ws.close(1008, err instanceof Error ? err.message : 'Unauthorized')
+        return
+      }
+
       const { id: sessionId } = req.params as { id: string }
 
       // Ownership check via RLS
