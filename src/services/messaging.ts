@@ -235,7 +235,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
         content,
         contentType,
         conversationId: result.conversationId,
-        warmupStage: 'unrestricted',
+        aiGenerated: false,
       },
       { removeOnComplete: true, removeOnFail: 100 },
     )

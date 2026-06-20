@@ -45,7 +45,7 @@ const sessionsRoutes: FastifyPluginAsync = async (app) => {
     let session: { id: string } | undefined
     try {
       const rows = await withClient(req.clientId, async (tx) => {
-        return (await tx`
+        const inserted = (await tx`
           INSERT INTO whatsapp_sessions (client_id, phone_number, role, primary_session_id, status)
           VALUES (
             ${req.clientId},
@@ -56,6 +56,17 @@ const sessionsRoutes: FastifyPluginAsync = async (app) => {
           )
           RETURNING id
         `) as unknown as Array<{ id: string }>
+
+        const sessionId: string = inserted[0]!.id
+
+        // Create default warmup profile atomically with the session.
+        // Default volume_curve and content_stages come from column defaults.
+        await tx`
+          INSERT INTO warmup_profiles (session_id, client_id)
+          VALUES (${sessionId}, ${req.clientId})
+        `
+
+        return inserted
       })
       session = rows[0]
     } catch (err: unknown) {

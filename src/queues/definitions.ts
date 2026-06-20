@@ -47,8 +47,9 @@ export interface OutboundMessageJob {
   contentType: 'text' | 'image' | 'audio' | 'video' | 'document'
   mediaUrl?: string
   conversationId: string
-  // Anti-detection context — worker uses these for timing decisions
-  warmupStage: 'conversational' | 'light_cta' | 'unrestricted'
+  // Anti-detection — worker resolves warmup stage from DB at process time;
+  // aiGenerated skips variation (model output is already diverse).
+  aiGenerated: boolean
 }
 
 export interface InboundMessageJob {

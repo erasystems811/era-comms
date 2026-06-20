@@ -13,6 +13,10 @@ import { redis as generalRedis } from '../db/redis.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import { BaileysSession } from './baileys-session.js'
+import { calculateJitter } from '../anti-detection/jitter.js'
+import { checkWarmup, incrementDailyCount } from '../anti-detection/warmup.js'
+import { varyMessage } from '../anti-detection/variation.js'
+import { updateRiskScore } from '../anti-detection/risk.js'
 import {
   QUEUE,
   KEY,
@@ -28,6 +32,10 @@ import type {
   SessionCommand,
 } from '../queues/definitions.js'
 import type { InboundMessage } from '../interfaces/session.js'
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
 
 // argv[2] is string | undefined due to noUncheckedIndexedAccess.
 // Guard early and re-declare as string so TypeScript propagates the
@@ -145,30 +153,87 @@ async function start(): Promise<void> {
   const outboundWorker = new Worker<OutboundMessageJob>(
     QUEUE.outbound(SESSION_ID),
     async (job) => {
-      // BullMQ data fields are typed via OutboundMessageJob — all are string.
-      // Explicit locals satisfy strict null checks in the template literals below.
-      const messageId: string = job.data.messageId
-      const to: string = job.data.to
-      const content: string = job.data.content
+      const messageId:    string  = job.data.messageId
+      const to:           string  = job.data.to
+      const content:      string  = job.data.content
+      const contentType:  string  = job.data.contentType
+      const aiGenerated:  boolean = job.data.aiGenerated
 
       workerLogger.debug({ messageId, to }, 'Processing outbound message')
 
+      // ── 1. WARMUP CAP CHECK ─────────────────────────────────
+      //
+      // Resolve the current warmup stage and enforce the daily cap.
+      // If the cap is exceeded, mark the message failed without
+      // retrying — the cap is deterministic for the rest of the day.
+
+      const warmup = await checkWarmup(SESSION_ID)
+
+      if (!warmup.allowed) {
+        workerLogger.warn(
+          { messageId, sentToday: warmup.sentToday, cap: warmup.cap },
+          'Warmup daily cap reached — message failed',
+        )
+        await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
+        return // no throw — BullMQ treats this as success; no retry
+      }
+
+      // ── 2. MESSAGE VARIATION ────────────────────────────────
+      //
+      // Only text messages authored by humans are varied.
+      // Falls back to original on any AI error (never blocks delivery).
+
+      let finalContent   = content
+      let wasVaried      = false
+
+      if (contentType === 'text') {
+        const varied = await varyMessage(content, warmup.stage, aiGenerated)
+        finalContent = varied.content
+        wasVaried    = varied.wasVaried
+      }
+
+      // ── 3. JITTER + COMPOSING ───────────────────────────────
+      //
+      // Show a "typing…" indicator for a human-realistic duration,
+      // then pause before actually sending.
+
+      const jitter = calculateJitter(warmup.stage, finalContent.length)
+
       try {
-        const result = await session.sendMessage(to, content)
+        await session.sendComposing(to, jitter.composingMs)
+      } catch {
+        // Composing is best-effort — proceed without it
+      }
+
+      await delay(jitter.delayMs)
+
+      // ── 4. SEND ─────────────────────────────────────────────
+
+      try {
+        const result = await session.sendMessage(to, finalContent)
+
+        // Increment warmup counter immediately after confirmed send
+        await incrementDailyCount(SESSION_ID)
 
         await adminDb`
           UPDATE messages
-          SET wa_message_id = ${result.waMessageId},
-              status        = 'sent',
-              sent_at       = NOW()
+          SET wa_message_id    = ${result.waMessageId},
+              status           = 'sent',
+              sent_at          = NOW(),
+              was_varied       = ${wasVaried},
+              original_content = ${wasVaried ? content : null},
+              warmup_stage     = ${warmup.stage}
           WHERE id = ${messageId}
         `
+
+        // Risk score update is fire-and-forget — never block delivery
+        void updateRiskScore(SESSION_ID).catch((err: unknown) =>
+          workerLogger.warn({ err }, 'Risk score update failed'),
+        )
       } catch (err) {
         workerLogger.error({ messageId, err }, 'Failed to send message')
-
         await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
-
-        throw err // Re-throw so BullMQ applies retry policy
+        throw err // re-throw so BullMQ applies retry policy
       }
     },
     {
