@@ -62,7 +62,9 @@ export class CallSupervisor {
       this.reconnectAttempts = 0
       log.info('ESL connected — listening for calls')
 
-      client.on('CHANNEL_CREATE', (evt: ESLEvent) => void this.onChannelCreate(evt))
+      // Capture `client` in the closure — avoids `this.esl!` non-null assertion
+      // if ESL reconnects between event registration and event firing.
+      client.on('CHANNEL_CREATE', (evt: ESLEvent) => void this.onChannelCreate(client, evt))
       client.on('disconnect', () => void this.onDisconnect())
       client.on('error',      (err: unknown) => log.error({ err }, 'ESL error'))
 
@@ -72,7 +74,7 @@ export class CallSupervisor {
     }
   }
 
-  private async onChannelCreate(evt: ESLEvent): Promise<void> {
+  private async onChannelCreate(esl: ESLClient, evt: ESLEvent): Promise<void> {
     const uuid        = evt['Unique-ID']
     const fromNumber  = evt['Caller-Caller-ID-Number'] ?? ''
     const toNumber    = evt['Caller-Destination-Number'] ?? ''
@@ -91,7 +93,7 @@ export class CallSupervisor {
     const session = sessions[0]
     if (!session) {
       log.warn({ uuid, toNumber }, 'No client found for destination number — hanging up')
-      this.esl?.api(`uuid_hangup ${uuid} NO_ROUTE_DESTINATION`)
+      void esl.api(`uuid_hangup ${uuid} NO_ROUTE_DESTINATION`)
       return
     }
 
@@ -113,8 +115,7 @@ export class CallSupervisor {
 
     log.info({ uuid, fromNumber, toNumber, clientId }, 'Routing call to handler')
 
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-    void handleCall(this.esl!, uuid, fromNumber, toNumber, clientId, voiceProfile)
+    void handleCall(esl, uuid, fromNumber, toNumber, clientId, voiceProfile)
       .catch((err: unknown) => log.error({ err, uuid }, 'Call handler crashed'))
   }
 

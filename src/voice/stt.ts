@@ -8,7 +8,7 @@
 // The call handler stops the recording before calling transcribe().
 
 import { createReadStream } from 'node:fs'
-import { unlink } from 'node:fs/promises'
+import { readFile, unlink } from 'node:fs/promises'
 import OpenAI from 'openai'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
@@ -38,17 +38,15 @@ async function transcribeDeepgram(audioPath: string): Promise<string> {
   const apiKey = config.voice.deepgramApiKey!
   const start = Date.now()
 
-  // Deepgram HTTP API — no SDK required
-  const stream = createReadStream(audioPath)
+  // Read into Buffer — fetch in Node.js 20 does not accept fs.ReadStream directly
+  const audioBuffer = await readFile(audioPath)
   const response = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&smart_format=false', {
     method: 'POST',
     headers: {
       Authorization: `Token ${apiKey}`,
       'Content-Type': 'audio/wav',
     },
-    body: stream as unknown as BodyInit,
-    // @ts-expect-error — Node.js 20 fetch accepts Node streams
-    duplex: 'half',
+    body: audioBuffer,
   })
 
   if (!response.ok) {

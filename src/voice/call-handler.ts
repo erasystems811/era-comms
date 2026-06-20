@@ -18,7 +18,7 @@
 //
 // Temp files (WAV recordings, TTS audio) are deleted after each use.
 
-import { mkdir } from 'node:fs/promises'
+import { mkdir, unlink } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { adminDb } from '../db/client.js'
@@ -188,21 +188,44 @@ export async function handleCall(
 // ── HELPERS ──────────────────────────────────────────────────────
 
 async function recordSpeech(esl: ESLClient, uuid: string, filePath: string): Promise<boolean> {
+  // RECORD_STOP may lack Unique-ID in some FreeSWITCH builds.
+  // CHANNEL_EXECUTE_COMPLETE{Application:record} is the authoritative signal.
+  // Listen for both; whichever fires first (and passes UUID check) wins.
+  // Timeout at max_seconds + 10s to guard against dropped events.
   return new Promise((resolve) => {
-    const onHangup = (evt: ESLEvent) => {
-      if (evt['Unique-ID'] !== uuid) return
+    const TIMEOUT_MS = (RECORD_MAX_SECONDS + 10) * 1000
+
+    const cleanup = (): void => {
       esl.off('CHANNEL_HANGUP', onHangup)
       esl.off('RECORD_STOP', onStop)
+      esl.off('CHANNEL_EXECUTE_COMPLETE', onComplete)
+      clearTimeout(timer)
+    }
+    const onHangup = (evt: ESLEvent) => {
+      if (evt['Unique-ID'] !== uuid) return
+      cleanup()
       resolve(false)
     }
     const onStop = (evt: ESLEvent) => {
-      if (evt['Unique-ID'] !== uuid) return
-      esl.off('CHANNEL_HANGUP', onHangup)
-      esl.off('RECORD_STOP', onStop)
+      // Accept if UUID matches or is absent (older FS builds omit it)
+      if (evt['Unique-ID'] && evt['Unique-ID'] !== uuid) return
+      cleanup()
       resolve(true)
     }
+    const onComplete = (evt: ESLEvent) => {
+      if (evt['Unique-ID'] !== uuid || evt['Application'] !== 'record') return
+      cleanup()
+      resolve(true)
+    }
+    const timer = setTimeout(() => {
+      cleanup()
+      resolve(true) // treat timeout as "recording done" — STT will handle empty audio
+    }, TIMEOUT_MS)
+    timer.unref()
+
     esl.on('CHANNEL_HANGUP', onHangup)
     esl.on('RECORD_STOP', onStop)
+    esl.on('CHANNEL_EXECUTE_COMPLETE', onComplete)
     esl.sendmsg(uuid, 'record', `${filePath} ${RECORD_MAX_SECONDS} ${SILENCE_THRESHOLD} ${SILENCE_HITS}`)
   })
 }
@@ -211,8 +234,6 @@ async function playFile(esl: ESLClient, uuid: string, filePath: string): Promise
   try {
     await esl.executeAndWait(uuid, 'playback', filePath)
   } finally {
-    // Delete file after playback (or on error)
-    const { unlink } = await import('node:fs/promises')
     await unlink(filePath).catch(() => {})
   }
 }
