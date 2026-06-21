@@ -37,8 +37,8 @@ const schema = z.object({
 
   // Postal self-hosted mail server (optional — bulk/campaign email module)
   // Set these once the VPS is running. Module degrades gracefully when unset.
-  POSTAL_SERVER_URL: z.string().url().optional(),   // e.g. https://mail.erasystems.io
-  POSTAL_API_KEY:    z.string().optional(),          // Postal server API key
+  POSTAL_SERVER_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
+  POSTAL_API_KEY:    z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
   POSTAL_RATE_LIMIT: z.coerce.number().int().default(50), // sends per second
 
   // Voice infrastructure
