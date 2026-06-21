@@ -28,8 +28,8 @@ const schema = z.object({
   // Operator alert destination
   ALERT_WHATSAPP_NUMBER: z.string().min(1, 'ALERT_WHATSAPP_NUMBER is required'),
 
-  // The ERA Systems internal client — pre-seeded, used for self-alerting
-  OPERATOR_INTERNAL_CLIENT_ID: z.string().uuid().optional(),
+  // The ERA Systems internal client — pre-seeded by migration 004
+  OPERATOR_INTERNAL_CLIENT_ID: z.string().uuid().default('c0ffee00-era0-4sys-a000-000000000001'),
 
   // Email delivery via Resend (optional — email features degrade gracefully if unset)
   RESEND_API_KEY: z.string().optional(),
