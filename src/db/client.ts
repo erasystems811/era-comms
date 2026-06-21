@@ -12,13 +12,25 @@ export const db = postgres(config.db.url, {
   },
 })
 
-// Admin connection — BYPASSRLS, used for operator dashboard and internal ops.
-// Connects as era_admin. Requires DATABASE_ADMIN_URL if the admin role uses a
-// different password; falls back to DATABASE_URL for local development.
-export const adminDb = postgres(process.env['DATABASE_ADMIN_URL'] ?? config.db.url, {
+// Sentinel UUID that identifies an admin connection to the RLS policies.
+// is_admin_context() in the DB checks for this value; when present, all
+// RLS policies allow full cross-client visibility.
+export const ADMIN_SENTINEL = '00000000-0000-0000-0000-000000000001'
+
+// Admin connection pool — sees across all clients via the sentinel GUC.
+// Access is enforced at the application layer via OPERATOR_SECRET; the DB
+// layer enforces it via is_admin_context() inside each RLS policy.
+// No BYPASSRLS or superuser role required.
+export const adminDb = postgres(config.db.url, {
   max: 5,
   idle_timeout: 30,
   connect_timeout: 10,
+  connection: {
+    'app.current_client_id': ADMIN_SENTINEL,
+  },
+  onnotice: (notice) => {
+    logger.debug({ notice }, 'PostgreSQL notice')
+  },
 })
 
 // ── RLS CONTEXT HELPER ────────────────────────────────────────

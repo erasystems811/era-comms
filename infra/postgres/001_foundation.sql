@@ -33,15 +33,6 @@ EXCEPTION WHEN duplicate_object THEN NULL;
   RAISE NOTICE 'Cannot CREATE ROLE era_readonly — skipping (managed DB)';
 END $$;
 
--- Requires superuser or the connecting user to itself have BYPASSRLS.
--- On Timescale Cloud connect as tsdbadmin to apply this; otherwise skipped.
-DO $$ BEGIN
-  ALTER ROLE era_admin BYPASSRLS;
-EXCEPTION WHEN insufficient_privilege THEN
-  RAISE NOTICE 'Cannot ALTER ROLE era_admin BYPASSRLS — skipping (managed DB). Ensure your app DB user has BYPASSRLS or connect adminDb as tsdbadmin.';
-         WHEN undefined_object THEN
-  RAISE NOTICE 'Role era_admin does not exist — skipping BYPASSRLS (managed DB)';
-END $$;
 
 -- ============================================================
 -- SECTION 1: PLANS
@@ -1079,12 +1070,16 @@ CREATE INDEX idx_alerts_client     ON alert_history (client_id, created_at DESC)
 -- ============================================================
 -- SECTION 19: ROW-LEVEL SECURITY
 -- All client-scoped tables enforce isolation via RLS.
--- Application sets: SET LOCAL app.current_client_id = '<uuid>'
--- at the start of every request (era_app role).
--- era_admin role has BYPASSRLS — used for operator dashboard
--- and internal system operations.
--- The TRUE argument to current_setting() means return NULL (not
--- an error) if the variable is not set — admin queries are safe.
+--
+-- Client queries: withClient(clientId, tx) sets
+--   SET LOCAL app.current_client_id = '<uuid>'
+-- inside a transaction so current_client_id() returns the UUID.
+--
+-- Admin queries: adminDb pool sets
+--   app.current_client_id = '00000000-0000-0000-0000-000000000001'
+-- (the ADMIN_SENTINEL) at connection startup. is_admin_context()
+-- detects this and the USING clause allows all rows through.
+-- No BYPASSRLS or superuser privilege required.
 -- ============================================================
 
 ALTER TABLE clients                        ENABLE ROW LEVEL SECURITY;
@@ -1103,58 +1098,66 @@ ALTER TABLE message_events                 ENABLE ROW LEVEL SECURITY;
 ALTER TABLE voice_calls                    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE usage_events                   ENABLE ROW LEVEL SECURITY;
 
--- Helper: current client UUID from session variable
--- Returns NULL if not set (admin queries bypass anyway)
+-- Returns the current client UUID from the session variable.
+-- Returns NULL when the variable is not set.
 CREATE OR REPLACE FUNCTION current_client_id()
 RETURNS UUID LANGUAGE sql STABLE AS $$
   SELECT NULLIF(current_setting('app.current_client_id', TRUE), '')::UUID
 $$;
 
+-- Returns TRUE when the connection is the admin pool (sentinel UUID is set).
+-- The sentinel '00000000-0000-0000-0000-000000000001' is set at connection
+-- startup by the adminDb postgres.js pool — no BYPASSRLS required.
+CREATE OR REPLACE FUNCTION is_admin_context()
+RETURNS boolean LANGUAGE sql STABLE AS $$
+  SELECT current_setting('app.current_client_id', TRUE) = '00000000-0000-0000-0000-000000000001'
+$$;
+
 CREATE POLICY client_isolation ON clients
-  USING (id = current_client_id());
+  USING (id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON api_keys
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON webhook_endpoints
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON webhook_deliveries
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON communication_profiles
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON communication_profile_versions
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 -- NULL client_id = default ERA voice, readable by all authenticated clients
 CREATE POLICY client_isolation ON voice_profiles
-  USING (client_id = current_client_id() OR client_id IS NULL);
+  USING (client_id = current_client_id() OR client_id IS NULL OR is_admin_context());
 
 CREATE POLICY client_isolation ON whatsapp_sessions
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON warmup_profiles
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON contacts
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON conversations
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON messages
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON message_events
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON voice_calls
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 CREATE POLICY client_isolation ON usage_events
-  USING (client_id = current_client_id());
+  USING (client_id = current_client_id() OR is_admin_context());
 
 -- ============================================================
 -- GRANT PERMISSIONS

@@ -2,7 +2,7 @@
 //
 // Loads the communication profile, recent message history, and
 // conversation state needed to call the AI. Returns everything
-// the AI worker needs in one DB round-trip (adminDb — bypasses RLS).
+// the AI worker needs in one DB round-trip (adminDb — admin sentinel context).
 
 import { adminDb } from '../db/client.js'
 import { estimateSentiment } from './classifier.js'
