@@ -8,6 +8,91 @@ const MIGRATIONS_DIR = join(
   '../../infra/postgres',
 )
 
+// Split SQL source into individual statements so each one is sent as its own
+// simple query (autocommit). Sending all statements as a single query causes
+// PostgreSQL to wrap them in an implicit transaction, which forbids statements
+// like CREATE MATERIALIZED VIEW WITH DATA and TimescaleDB continuous aggregates.
+//
+// Handles: dollar-quoted strings ($$...$$, $tag$...$tag$), single-quoted
+// strings, single-line comments, and multi-line comments.
+function splitStatements(sql: string): string[] {
+  const statements: string[] = []
+  let current = ''
+  let i = 0
+
+  while (i < sql.length) {
+    const ch = sql[i]!
+
+    // Dollar-quoted string: $$...$$ or $tag$...$tag$
+    if (ch === '$') {
+      const tagMatch = sql.slice(i).match(/^\$([^$]*)\$/)
+      if (tagMatch) {
+        const tag = tagMatch[0]
+        const closePos = sql.indexOf(tag, i + tag.length)
+        if (closePos !== -1) {
+          current += sql.slice(i, closePos + tag.length)
+          i = closePos + tag.length
+          continue
+        }
+      }
+    }
+
+    // Single-line comment
+    if (ch === '-' && sql[i + 1] === '-') {
+      const end = sql.indexOf('\n', i)
+      current += end === -1 ? sql.slice(i) : sql.slice(i, end + 1)
+      i = end === -1 ? sql.length : end + 1
+      continue
+    }
+
+    // Multi-line comment
+    if (ch === '/' && sql[i + 1] === '*') {
+      const end = sql.indexOf('*/', i + 2)
+      current += end === -1 ? sql.slice(i) : sql.slice(i, end + 2)
+      i = end === -1 ? sql.length : end + 2
+      continue
+    }
+
+    // Single-quoted string (handles '' escape)
+    if (ch === "'") {
+      let j = i + 1
+      while (j < sql.length) {
+        if (sql[j] === "'" && sql[j + 1] === "'") {
+          j += 2
+        } else if (sql[j] === "'") {
+          j++
+          break
+        } else {
+          j++
+        }
+      }
+      current += sql.slice(i, j)
+      i = j
+      continue
+    }
+
+    // Statement terminator
+    if (ch === ';') {
+      current += ch
+      i++
+      const trimmed = current.trim()
+      if (trimmed.length > 1) {
+        statements.push(trimmed)
+      }
+      current = ''
+      continue
+    }
+
+    current += ch
+    i++
+  }
+
+  const trailing = current.trim()
+  if (trailing) statements.push(trailing)
+
+  return statements
+}
+
 async function migrate(): Promise<void> {
   const databaseUrl = process.env['DATABASE_URL']
   if (!databaseUrl) {
@@ -47,12 +132,14 @@ async function migrate(): Promise<void> {
 
       const content = await readFile(join(MIGRATIONS_DIR, filename), 'utf-8')
 
-      // Run outside a transaction: CREATE MATERIALIZED VIEW WITH DATA and
-      // TimescaleDB continuous aggregates are forbidden inside transaction blocks.
-      await sql.unsafe(content)
+      // Execute each statement individually so every one runs in autocommit
+      // mode — PostgreSQL forbids CREATE MATERIALIZED VIEW WITH DATA and
+      // TimescaleDB continuous aggregates inside any transaction block.
+      const statements = splitStatements(content)
+      for (const stmt of statements) {
+        await sql.unsafe(stmt)
+      }
 
-      // Record completion in its own short transaction so the file is not
-      // re-applied on the next startup if this insert somehow fails.
       await sql`INSERT INTO schema_migrations (filename) VALUES (${filename})`
 
       console.log(`  apply ${filename}`)
