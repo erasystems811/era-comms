@@ -17,11 +17,15 @@
 
 import { randomBytes, createHash } from 'node:crypto'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
+import { Redis } from 'ioredis'
 import { adminDb } from '../../db/client.js'
 import { config } from '../../shared/config.js'
 import { currentLimit } from '../../db/redis.js'
 import { invalidatePlanCache } from '../../services/plan.js'
-import { NotFoundError } from '../../shared/errors.js'
+import { NotFoundError, ConflictError } from '../../shared/errors.js'
+import { CHANNEL } from '../../queues/definitions.js'
+
+const E164_RE = /^\+[1-9]\d{6,14}$/
 
 // ── Auth guard ────────────────────────────────────────────────
 
@@ -316,6 +320,217 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!rows[0]) throw new NotFoundError('API key')
 
     return reply.status(204).send()
+  })
+
+  // ── GET /v1/admin/sessions ──────────────────────────────────────
+  // All WhatsApp sessions across all clients with warmup + health.
+
+  app.get('/sessions', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    type SessionRow = {
+      id: string; phone_number: string; status: string; risk_score: string
+      role: string; created_at: string; last_heartbeat_at: Date | null
+      messages_sent_total: string; connected_at: Date | null
+      cooldown_until: Date | null; client_name: string; client_id: string
+      warmup_day: number | null; warmup_complete: boolean | null; skip_warmup: boolean | null
+    }
+
+    const rows = (await adminDb`
+      SELECT ws.id, ws.phone_number, ws.status, ws.risk_score, ws.role,
+             ws.created_at, ws.last_heartbeat_at, ws.messages_sent_total,
+             ws.connected_at, ws.cooldown_until,
+             c.name AS client_name, c.id AS client_id,
+             wp.current_day AS warmup_day, wp.is_complete AS warmup_complete,
+             wp.skip_warmup
+      FROM   whatsapp_sessions ws
+      JOIN   clients c ON c.id = ws.client_id
+      LEFT JOIN warmup_profiles wp ON wp.session_id = ws.id
+      ORDER BY ws.created_at ASC
+    `) as unknown as SessionRow[]
+
+    return rows.map(r => ({
+      id:                r.id,
+      phoneNumber:       r.phone_number,
+      status:            r.status,
+      riskScore:         parseFloat(r.risk_score),
+      role:              r.role,
+      createdAt:         r.created_at,
+      lastHeartbeatAt:   r.last_heartbeat_at,
+      messagesSentTotal: parseInt(r.messages_sent_total ?? '0', 10),
+      connectedAt:       r.connected_at,
+      cooldownUntil:     r.cooldown_until,
+      client:            { id: r.client_id, name: r.client_name },
+      warmup: {
+        currentDay:  r.warmup_day,
+        isComplete:  r.warmup_complete,
+        skipWarmup:  r.skip_warmup,
+      },
+    }))
+  })
+
+  // ── POST /v1/admin/sessions ─────────────────────────────────────
+  // Create a new WhatsApp session for a client and start the worker.
+
+  app.post('/sessions', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const body = req.body as {
+      clientId?: string; phoneNumber?: string
+      role?: 'primary' | 'backup'; primarySessionId?: string
+    }
+
+    if (!body.clientId) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'clientId is required' })
+    }
+    const phoneNumber = body.phoneNumber?.trim() ?? ''
+    if (!E164_RE.test(phoneNumber)) {
+      return reply.status(400).send({
+        error: 'VALIDATION_ERROR',
+        message: 'Phone number must be in international format, e.g. +2348012345678',
+      })
+    }
+
+    const existing = (await adminDb`SELECT id FROM clients WHERE id = ${body.clientId}`) as unknown as Array<{ id: string }>
+    if (!existing[0]) throw new NotFoundError('Client')
+
+    const role: 'primary' | 'backup' = body.role === 'backup' ? 'backup' : 'primary'
+
+    let sessionId: string
+    try {
+      const rows = (await adminDb`
+        INSERT INTO whatsapp_sessions (client_id, phone_number, role, primary_session_id, status)
+        VALUES (${body.clientId}, ${phoneNumber}, ${role}, ${body.primarySessionId ?? null}, 'pending_qr')
+        RETURNING id
+      `) as unknown as Array<{ id: string }>
+      sessionId = rows[0]!.id
+
+      await adminDb`
+        INSERT INTO warmup_profiles (session_id, client_id)
+        VALUES (${sessionId}, ${body.clientId})
+      `
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code
+      if (code === '23505') throw new ConflictError(`A session for ${phoneNumber} already exists`)
+      throw err
+    }
+
+    await req.server.supervisor.startSession(sessionId)
+
+    return reply.status(201).send({ id: sessionId, phoneNumber, role, status: 'pending_qr' })
+  })
+
+  // ── DELETE /v1/admin/sessions/:id ──────────────────────────────
+  // Stop and disconnect a running session.
+
+  app.delete('/sessions/:id', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id } = req.params as { id: string }
+    const rows = (await adminDb`SELECT id FROM whatsapp_sessions WHERE id = ${id}`) as unknown as Array<{ id: string }>
+    if (!rows[0]) throw new NotFoundError('Session')
+
+    await req.server.supervisor.stopSession(id)
+    return reply.status(204).send()
+  })
+
+  // ── GET /v1/admin/sessions/:id/qr (WebSocket) ──────────────────
+  // Streams QR code events for a session. Auth via ?secret= param.
+
+  app.get('/sessions/:id/qr', { websocket: true }, (stream, req) => {
+    const ws = stream.socket
+    void (async () => {
+      const query = req.query as Record<string, string>
+      if (!query.secret || query.secret !== config.operatorSecret) {
+        ws.close(1008, 'Unauthorized')
+        return
+      }
+
+      const { id: sessionId } = req.params as { id: string }
+      const rows = (await adminDb`SELECT id FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as Array<{ id: string }>
+      if (!rows[0]) { ws.close(1008, 'Session not found'); return }
+
+      const subscriber = new Redis(config.redis.url, { maxRetriesPerRequest: null })
+      await subscriber.subscribe(CHANNEL.sessionQR(sessionId))
+      subscriber.on('message', (_ch: string, msg: string) => {
+        if (ws.readyState === ws.OPEN) ws.send(msg)
+      })
+      const cleanup = () => { void subscriber.quit() }
+      stream.on('close', cleanup)
+      stream.on('error', cleanup)
+    })()
+  })
+
+  // ── GET /v1/admin/monitoring ────────────────────────────────────
+  // System-wide health snapshot for the operator dashboard.
+
+  app.get('/monitoring', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    type AlertRow = { id: string; alert_type: string; severity: string; message: string; created_at: string; resolved_at: Date | null }
+
+    const [allHealth, alerts] = await Promise.all([
+      req.server.supervisor.getAllHealth(),
+      adminDb`
+        SELECT id, alert_type, severity, message, created_at, resolved_at
+        FROM   alert_history ORDER BY created_at DESC LIMIT 10
+      ` as unknown as Promise<AlertRow[]>,
+    ])
+
+    const counts = allHealth.reduce((acc: Record<string, number>, h) => {
+      const key = h.status; acc[key] = (acc[key] ?? 0) + 1; return acc
+    }, {})
+
+    return {
+      sessions: {
+        total:        allHealth.length,
+        connected:    counts['connected']    ?? 0,
+        disconnected: counts['disconnected'] ?? 0,
+        flagged:      counts['flagged']      ?? 0,
+        banned:       counts['banned']       ?? 0,
+      },
+      recentAlerts: alerts.map(a => ({
+        id:        a.id,
+        type:      a.alert_type,
+        severity:  a.severity,
+        message:   a.message,
+        createdAt: a.created_at,
+        resolved:  !!a.resolved_at,
+      })),
+    }
+  })
+
+  // ── GET /v1/admin/alerts ────────────────────────────────────────
+  // Full alert history for the notification panel.
+
+  app.get('/alerts', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    type AlertHistoryRow = {
+      id: string; alert_type: string; severity: string; message: string
+      client_id: string | null; session_id: string | null
+      resolved_at: Date | null; created_at: string
+    }
+
+    const rows = (await adminDb`
+      SELECT id, alert_type, severity, message,
+             client_id, session_id, resolved_at, created_at
+      FROM   alert_history
+      ORDER BY created_at DESC
+      LIMIT 100
+    `) as unknown as AlertHistoryRow[]
+
+    return rows.map(a => ({
+      id:         a.id,
+      type:       a.alert_type,
+      severity:   a.severity,
+      message:    a.message,
+      clientId:   a.client_id,
+      sessionId:  a.session_id,
+      resolved:   !!a.resolved_at,
+      resolvedAt: a.resolved_at,
+      createdAt:  a.created_at,
+    }))
   })
 }
 

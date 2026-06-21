@@ -29,9 +29,9 @@ export async function buildServer(supervisor: ISessionSupervisor) {
   })
 
   await app.register(cors, {
-    origin: '*', // ERA Comms is server-to-server infrastructure
+    origin: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'X-API-Key'],
+    allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Operator-Secret', 'Authorization'],
   })
 
   await app.register(websocketPlugin)
