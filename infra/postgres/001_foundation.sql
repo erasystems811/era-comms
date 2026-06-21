@@ -54,7 +54,7 @@ CREATE TABLE plans (
   monthly_message_cap   INTEGER,
   daily_message_cap     INTEGER,
   hourly_message_cap    INTEGER,
-  max_sessions          INTEGER NOT NULL DEFAULT 1,
+  max_sessions          INTEGER DEFAULT 1,          -- NULL = unlimited
   max_contacts          INTEGER,
 
   -- Billing
