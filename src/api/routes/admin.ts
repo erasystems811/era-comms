@@ -43,11 +43,14 @@ function assertOperator(req: FastifyRequest, reply: FastifyReply): boolean {
 
 type PlanRow = {
   id: string; name: string; display_name: string
-  ai_enabled: boolean; voice_enabled: boolean
+  ai_enabled: boolean; voice_enabled: boolean; analytics_enabled: boolean
   monthly_message_cap: number | null
   daily_message_cap: number | null
   hourly_message_cap: number | null
-  max_sessions: number
+  max_sessions: number | null
+  billing_model: string
+  monthly_fee: string | null
+  client_count: string
 }
 
 type ClientRow = {
@@ -73,9 +76,14 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!assertOperator(req, reply)) return
 
     const rows = (await adminDb`
-      SELECT id, name, display_name, ai_enabled, voice_enabled,
-             monthly_message_cap, daily_message_cap, hourly_message_cap, max_sessions
-      FROM   plans ORDER BY name
+      SELECT p.id, p.name, p.display_name, p.ai_enabled, p.voice_enabled,
+             p.analytics_enabled, p.monthly_message_cap, p.daily_message_cap,
+             p.hourly_message_cap, p.max_sessions, p.billing_model, p.monthly_fee,
+             COUNT(c.id)::text AS client_count
+      FROM   plans p
+      LEFT JOIN clients c ON c.plan_id = p.id AND c.status = 'active'
+      GROUP BY p.id
+      ORDER BY p.name
     `) as unknown as PlanRow[]
 
     return rows.map(p => ({
@@ -84,13 +92,146 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       displayName:      p.display_name,
       aiEnabled:        p.ai_enabled,
       voiceEnabled:     p.voice_enabled,
+      analyticsEnabled: p.analytics_enabled,
+      billingModel:     p.billing_model,
+      monthlyFee:       p.monthly_fee ? parseFloat(p.monthly_fee) : null,
       limits: {
         monthlyMessages: p.monthly_message_cap,
         dailyMessages:   p.daily_message_cap,
         hourlyMessages:  p.hourly_message_cap,
         maxSessions:     p.max_sessions,
       },
+      clientCount: parseInt(p.client_count ?? '0', 10),
     }))
+  })
+
+  // ── POST /v1/admin/plans ────────────────────────────────────
+
+  app.post('/plans', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const body = req.body as {
+      name?: string; displayName?: string
+      aiEnabled?: boolean; voiceEnabled?: boolean; analyticsEnabled?: boolean
+      billingModel?: 'none' | 'usage_based' | 'plan_based'
+      monthlyFee?: number | null
+      monthlyMessageCap?: number | null; dailyMessageCap?: number | null
+      hourlyMessageCap?: number | null; maxSessions?: number | null
+    }
+
+    if (!body.name?.trim()) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'name is required' })
+    }
+    if (!body.displayName?.trim()) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'displayName is required' })
+    }
+    if (!body.billingModel || !['none', 'usage_based', 'plan_based'].includes(body.billingModel)) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'billingModel must be none, usage_based, or plan_based' })
+    }
+
+    const name = body.name.trim().toLowerCase().replace(/\s+/g, '_')
+
+    try {
+      type PlanInsert = { id: string }
+      const rows = (await adminDb`
+        INSERT INTO plans (
+          name, display_name, ai_enabled, voice_enabled, analytics_enabled,
+          billing_model, monthly_fee,
+          monthly_message_cap, daily_message_cap, hourly_message_cap, max_sessions
+        ) VALUES (
+          ${name}, ${body.displayName.trim()},
+          ${body.aiEnabled ?? true}, ${body.voiceEnabled ?? false}, ${body.analyticsEnabled ?? true},
+          ${body.billingModel}, ${body.monthlyFee ?? null},
+          ${body.monthlyMessageCap ?? null}, ${body.dailyMessageCap ?? null},
+          ${body.hourlyMessageCap ?? null}, ${body.maxSessions ?? null}
+        )
+        RETURNING id
+      `) as unknown as PlanInsert[]
+
+      return reply.status(201).send({
+        id: rows[0]!.id, name,
+        displayName: body.displayName.trim(),
+        aiEnabled: body.aiEnabled ?? true,
+        voiceEnabled: body.voiceEnabled ?? false,
+        analyticsEnabled: body.analyticsEnabled ?? true,
+        billingModel: body.billingModel,
+        monthlyFee: body.monthlyFee ?? null,
+        limits: {
+          monthlyMessages: body.monthlyMessageCap ?? null,
+          dailyMessages: body.dailyMessageCap ?? null,
+          hourlyMessages: body.hourlyMessageCap ?? null,
+          maxSessions: body.maxSessions ?? null,
+        },
+        clientCount: 0,
+      })
+    } catch (err: unknown) {
+      if ((err as { code?: string })?.code === '23505') {
+        return reply.status(409).send({ error: 'CONFLICT', message: `A plan named "${name}" already exists` })
+      }
+      throw err
+    }
+  })
+
+  // ── PATCH /v1/admin/plans/:id ───────────────────────────────
+
+  app.patch('/plans/:id', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id } = req.params as { id: string }
+    const body = req.body as {
+      displayName: string
+      aiEnabled: boolean; voiceEnabled: boolean; analyticsEnabled: boolean
+      billingModel: 'none' | 'usage_based' | 'plan_based'
+      monthlyFee: number | null
+      monthlyMessageCap: number | null; dailyMessageCap: number | null
+      hourlyMessageCap: number | null; maxSessions: number | null
+    }
+
+    const existing = (await adminDb`SELECT id FROM plans WHERE id = ${id}`) as unknown as Array<{ id: string }>
+    if (!existing[0]) throw new NotFoundError('Plan')
+
+    await adminDb`
+      UPDATE plans SET
+        display_name        = ${body.displayName},
+        ai_enabled          = ${body.aiEnabled},
+        voice_enabled       = ${body.voiceEnabled},
+        analytics_enabled   = ${body.analyticsEnabled},
+        billing_model       = ${body.billingModel},
+        monthly_fee         = ${body.monthlyFee},
+        monthly_message_cap = ${body.monthlyMessageCap},
+        daily_message_cap   = ${body.dailyMessageCap},
+        hourly_message_cap  = ${body.hourlyMessageCap},
+        max_sessions        = ${body.maxSessions},
+        updated_at          = NOW()
+      WHERE id = ${id}
+    `
+
+    return reply.status(204).send()
+  })
+
+  // ── DELETE /v1/admin/plans/:id ──────────────────────────────
+
+  app.delete('/plans/:id', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id } = req.params as { id: string }
+
+    const existing = (await adminDb`SELECT id FROM plans WHERE id = ${id}`) as unknown as Array<{ id: string }>
+    if (!existing[0]) throw new NotFoundError('Plan')
+
+    const counts = (await adminDb`
+      SELECT COUNT(*)::text AS count FROM clients WHERE plan_id = ${id}
+    `) as unknown as Array<{ count: string }>
+    const n = parseInt(counts[0]?.count ?? '0', 10)
+    if (n > 0) {
+      return reply.status(409).send({
+        error: 'CONFLICT',
+        message: `Cannot delete: ${n} business${n !== 1 ? 'es are' : ' is'} on this plan. Reassign them first.`,
+      })
+    }
+
+    await adminDb`DELETE FROM plans WHERE id = ${id}`
+    return reply.status(204).send()
   })
 
   // ── POST /v1/admin/clients ──────────────────────────────────
