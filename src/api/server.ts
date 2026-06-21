@@ -12,6 +12,10 @@ import sessionRoutes from './routes/sessions.js'
 import messagesRoutes from './routes/messages.js'
 import webhooksRoutes from './routes/webhooks.js'
 import adminRoutes from './routes/admin.js'
+import observabilityRoutes from './routes/observability.js'
+import requestsRoutes from './routes/requests.js'
+import publicRoutes from './routes/public.js'
+import businessRoutes from './routes/business.js'
 import metricsRoute from './routes/metrics-route.js'
 import './types.js'
 
@@ -82,7 +86,15 @@ export async function buildServer(supervisor: ISessionSupervisor) {
   )
 
   // Operator admin — X-Operator-Secret auth handled inside each route handler
-  await app.register(adminRoutes, { prefix: '/v1/admin' })
+  await app.register(adminRoutes,        { prefix: '/v1/admin' })
+  await app.register(observabilityRoutes, { prefix: '/v1/admin' })
+  await app.register(requestsRoutes,     { prefix: '/v1/admin' })
+
+  // Public endpoints — no auth (rate-limited by nginx upstream)
+  await app.register(publicRoutes, { prefix: '/v1/public' })
+
+  // Business portal — JWT Bearer auth handled inside each route handler
+  await app.register(businessRoutes, { prefix: '/v1/business' })
 
   // Prometheus scrape endpoint — no auth (controlled at network level)
   await app.register(metricsRoute)
