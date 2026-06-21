@@ -63,7 +63,7 @@ type SessionRow = {
 }
 
 type ApiKeyRow = {
-  id: string; client_id: string; key_prefix: string; scopes: string[]
+  id: string; client_id: string; label: string; key_prefix: string; scopes: string[]
   environment: string; status: string
   expires_at: string | null; last_used_at: string | null; created_at: string
 }
@@ -373,7 +373,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     `) as unknown as ClientSessionRow[]
 
     const keyRows = (await adminDb`
-      SELECT id, client_id, key_prefix, scopes, environment, status, expires_at, last_used_at, created_at
+      SELECT id, client_id, label, key_prefix, scopes, environment, status, expires_at, last_used_at, created_at
       FROM   api_keys
       WHERE  client_id = ${id}
       ORDER BY created_at DESC
@@ -428,7 +428,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       apiKeys: keyRows.map(k => ({
         id:         k.id,
         clientId:   k.client_id,
-        label:      k.environment,
+        label:      k.label,
         keyPreview: k.key_prefix,
         scopes:     k.scopes,
         active:     k.status === 'active',
@@ -526,10 +526,12 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const prefix  = rawKey.slice(0, 12)
     const expiresAt = body.expiresAt ? new Date(body.expiresAt) : null
 
+    const label = body.label?.trim() ?? ''
+
     type KeyInsertRow = { id: string; created_at: string }
     const rows = (await adminDb`
-      INSERT INTO api_keys (client_id, key_hash, key_prefix, environment, scopes, expires_at)
-      VALUES (${clientId}, ${keyHash}, ${prefix}, ${environment}, ${scopes}, ${expiresAt})
+      INSERT INTO api_keys (client_id, key_hash, key_prefix, label, environment, scopes, expires_at)
+      VALUES (${clientId}, ${keyHash}, ${prefix}, ${label}, ${environment}, ${scopes}, ${expiresAt})
       RETURNING id, created_at
     `) as unknown as KeyInsertRow[]
 
@@ -537,7 +539,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(201).send({
       id:        row.id,
       key:       rawKey,
-      keyPrefix: prefix,
+      label,
+      keyPreview: prefix,
       scopes,
       environment,
       expiresAt: body.expiresAt ?? null,
@@ -553,7 +556,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const { id: clientId } = req.params as { id: string }
 
     const rows = (await adminDb`
-      SELECT id, client_id, key_prefix, scopes, environment, status, expires_at, last_used_at, created_at
+      SELECT id, client_id, label, key_prefix, scopes, environment, status, expires_at, last_used_at, created_at
       FROM   api_keys
       WHERE  client_id = ${clientId}
       ORDER BY created_at DESC

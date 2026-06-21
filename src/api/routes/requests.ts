@@ -14,10 +14,20 @@
 //   PATCH /v1/admin/ai-templates/:id
 //   DELETE /v1/admin/ai-templates/:id  (soft-archive)
 
+import { randomBytes, scrypt } from 'node:crypto'
+import { promisify } from 'node:util'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { adminDb } from '../../db/client.js'
 import { config } from '../../shared/config.js'
 import { NotFoundError } from '../../shared/errors.js'
+
+const scryptAsync = promisify(scrypt)
+
+async function hashPassword(pwd: string): Promise<string> {
+  const salt = randomBytes(16).toString('hex')
+  const hash = (await scryptAsync(pwd, salt, 32)) as Buffer
+  return `${salt}:${hash.toString('hex')}`
+}
 
 // ── Auth guard ────────────────────────────────────────────────
 
@@ -152,6 +162,20 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
 
     const clientId = clientRows[0]!.id
 
+    // Generate a temporary password (business will change on first login)
+    const tempPassword = randomBytes(8).toString('hex') // 16 char random hex
+    const passwordHash = await hashPassword(tempPassword)
+
+    // Create business portal user account
+    await adminDb`
+      INSERT INTO business_users (client_id, email, password_hash)
+      VALUES (${clientId}, ${request.contact_email}, ${passwordHash})
+      ON CONFLICT DO NOTHING
+    `
+
+    // Seed default module config
+    await adminDb`INSERT INTO module_config (client_id) VALUES (${clientId}) ON CONFLICT DO NOTHING`
+
     // Mark request approved
     await adminDb`
       UPDATE onboarding_requests
@@ -169,7 +193,8 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       )
     `
 
-    return reply.status(201).send({ clientId })
+    // Return the temp password so operator can share it with the business owner
+    return reply.status(201).send({ clientId, tempPassword })
   })
 
   // ── POST /v1/admin/requests/:id/reject ─────────────────────

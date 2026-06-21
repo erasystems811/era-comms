@@ -8,6 +8,9 @@
 ALTER TABLE clients ADD COLUMN IF NOT EXISTS slug TEXT;
 ALTER TABLE clients ADD COLUMN IF NOT EXISTS contact_phone TEXT;
 
+-- Add label to api_keys (used in the operator panel key display)
+ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS label TEXT NOT NULL DEFAULT '';
+
 -- Partial unique index on slug (NULLs excluded — multiple clients may have no slug)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_slug ON clients (slug) WHERE slug IS NOT NULL;
 
