@@ -47,10 +47,13 @@ async function migrate(): Promise<void> {
 
       const content = await readFile(join(MIGRATIONS_DIR, filename), 'utf-8')
 
-      await sql.begin(async (tx) => {
-        await tx.unsafe(content)
-        await tx`INSERT INTO schema_migrations (filename) VALUES (${filename})`
-      })
+      // Run outside a transaction: CREATE MATERIALIZED VIEW WITH DATA and
+      // TimescaleDB continuous aggregates are forbidden inside transaction blocks.
+      await sql.unsafe(content)
+
+      // Record completion in its own short transaction so the file is not
+      // re-applied on the next startup if this insert somehow fails.
+      await sql`INSERT INTO schema_migrations (filename) VALUES (${filename})`
 
       console.log(`  apply ${filename}`)
       applied++
