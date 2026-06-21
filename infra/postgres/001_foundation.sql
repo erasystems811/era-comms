@@ -39,7 +39,7 @@ END $$;
 -- Seeded. Operator does not configure plans at runtime.
 -- ============================================================
 
-CREATE TABLE plans (
+CREATE TABLE IF NOT EXISTS plans (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name         TEXT NOT NULL UNIQUE,
   display_name TEXT NOT NULL,
@@ -76,14 +76,15 @@ INSERT INTO plans (
   ('internal',     'ERA Systems Internal', 'none',        TRUE, TRUE,  TRUE,  10,   NULL,  NULL, NULL),
   ('starter',      'Starter',              'usage_based', TRUE, FALSE, FALSE, 1,    1000,  100,  20),
   ('professional', 'Professional',         'plan_based',  TRUE, TRUE,  FALSE, 3,    10000, 500,  100),
-  ('enterprise',   'Enterprise',           'plan_based',  TRUE, TRUE,  TRUE,  NULL, NULL,  NULL, NULL);
+  ('enterprise',   'Enterprise',           'plan_based',  TRUE, TRUE,  TRUE,  NULL, NULL,  NULL, NULL)
+ON CONFLICT DO NOTHING;
 
 -- ============================================================
 -- SECTION 2: BUSINESS CATEGORIES
 -- Seeded. The ten categories are fixed.
 -- ============================================================
 
-CREATE TABLE business_categories (
+CREATE TABLE IF NOT EXISTS business_categories (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   slug        TEXT NOT NULL UNIQUE,
   name        TEXT NOT NULL,
@@ -101,7 +102,8 @@ INSERT INTO business_categories (slug, name) VALUES
   ('real_estate',           'Real Estate'),
   ('professional_services', 'Professional Services'),
   ('ecommerce',             'E-commerce'),
-  ('general',               'General');
+  ('general',               'General')
+ON CONFLICT DO NOTHING;
 
 -- ============================================================
 -- SECTION 3: DEFAULT COMMUNICATION PROFILES
@@ -109,7 +111,7 @@ INSERT INTO business_categories (slug, name) VALUES
 -- system_prompt uses {business_name} as the only template variable.
 -- ============================================================
 
-CREATE TABLE default_communication_profiles (
+CREATE TABLE IF NOT EXISTS default_communication_profiles (
   id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   category_id         UUID NOT NULL REFERENCES business_categories(id) UNIQUE,
   persona             TEXT NOT NULL,
@@ -159,7 +161,8 @@ You never provide specific medical diagnoses, prescription recommendations, or e
 Your tone is professional, warm, and clear. Avoid medical jargon unless the patient uses it first. Never be alarmist. If a topic falls outside your scope, acknowledge the patient with empathy and explain that a healthcare professional needs to handle it directly.
 
 Always respond in the language the patient writes in.'
-FROM business_categories WHERE slug = 'healthcare';
+FROM business_categories WHERE slug = 'healthcare'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- Retail
 INSERT INTO default_communication_profiles
@@ -197,7 +200,8 @@ Stay focused on helping with retail needs. Do not discuss competitors or anythin
 Your tone is upbeat and genuinely helpful. Keep responses concise and action-oriented.
 
 Always respond in the language the customer writes in.'
-FROM business_categories WHERE slug = 'retail';
+FROM business_categories WHERE slug = 'retail'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- Hospitality
 INSERT INTO default_communication_profiles
@@ -233,7 +237,8 @@ You assist with: reservations and booking modifications, check-in and check-out 
 You are warm, attentive, and quietly professional. Anticipate needs where possible. If a guest has a complaint, acknowledge it with genuine care before moving to a solution. Never argue with a guest. If something cannot be resolved, commit to connecting them with someone who can.
 
 Always respond in the language the guest writes in.'
-FROM business_categories WHERE slug = 'hospitality';
+FROM business_categories WHERE slug = 'hospitality'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- Logistics
 INSERT INTO default_communication_profiles
@@ -270,7 +275,8 @@ You assist with: shipment tracking, delivery window information, address correct
 Be precise and factual. Do not speculate about delays or make promises you cannot guarantee. If a shipment status is unclear, say so honestly and commit to following up. Never blame third-party carriers by name.
 
 Always respond in the language the customer writes in.'
-FROM business_categories WHERE slug = 'logistics';
+FROM business_categories WHERE slug = 'logistics'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- Finance
 INSERT INTO default_communication_profiles
@@ -307,7 +313,8 @@ You never give specific investment, tax, or legal advice. For any query involvin
 Your tone is calm, precise, and reassuring.
 
 Always respond in the language the customer writes in.'
-FROM business_categories WHERE slug = 'finance';
+FROM business_categories WHERE slug = 'finance'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- Education
 INSERT INTO default_communication_profiles
@@ -344,7 +351,8 @@ You assist with: course and program information, enrollment and registration, sc
 You are encouraging and supportive. If a student expresses distress, respond with empathy and direct them to the appropriate support resources — do not attempt to counsel them yourself.
 
 Always respond in the language the student or family writes in.'
-FROM business_categories WHERE slug = 'education';
+FROM business_categories WHERE slug = 'education'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- Real Estate
 INSERT INTO default_communication_profiles
@@ -382,7 +390,8 @@ You never guarantee property values or give legal, tax, or mortgage advice. Be h
 Your tone is professional, warm, and aspirational.
 
 Always respond in the language the client writes in.'
-FROM business_categories WHERE slug = 'real_estate';
+FROM business_categories WHERE slug = 'real_estate'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- Professional Services
 INSERT INTO default_communication_profiles
@@ -417,7 +426,8 @@ You assist with: service and scope inquiries, project status updates, scheduling
 You never overpromise or give specific advice outside the engagement scope. If a client asks something requiring direct expert input, acknowledge it and commit to getting them the right answer from the right person.
 
 Always respond in the language the client writes in.'
-FROM business_categories WHERE slug = 'professional_services';
+FROM business_categories WHERE slug = 'professional_services'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- E-commerce
 INSERT INTO default_communication_profiles
@@ -453,7 +463,8 @@ You assist with: order status and tracking, product information and recommendati
 Be friendly and solution-focused. If a customer has a problem, focus on fixing it. Keep responses brief and clear. If something is outside your authority, say what you can do and who can help with the rest.
 
 Always respond in the language the customer writes in.'
-FROM business_categories WHERE slug = 'ecommerce';
+FROM business_categories WHERE slug = 'ecommerce'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- General (fallback)
 INSERT INTO default_communication_profiles
@@ -487,13 +498,14 @@ You assist with general business inquiries, service information, scheduling, and
 Stay focused on business-relevant topics. If a question falls outside your scope, acknowledge it politely and direct the customer to the right channel. Be professional and clear in all responses.
 
 Always respond in the language the customer writes in.'
-FROM business_categories WHERE slug = 'general';
+FROM business_categories WHERE slug = 'general'
+ON CONFLICT (category_id) DO NOTHING;
 
 -- ============================================================
 -- SECTION 4: CLIENTS
 -- ============================================================
 
-CREATE TABLE clients (
+CREATE TABLE IF NOT EXISTS clients (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name        TEXT NOT NULL,
   type        TEXT NOT NULL CHECK (type IN ('internal', 'external')),
@@ -518,7 +530,7 @@ CREATE TABLE clients (
 -- Key format: era_live_<32 random chars> | era_test_<32 random chars>
 -- ============================================================
 
-CREATE TABLE api_keys (
+CREATE TABLE IF NOT EXISTS api_keys (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id   UUID NOT NULL REFERENCES clients(id),
 
@@ -536,14 +548,14 @@ CREATE TABLE api_keys (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_api_keys_prefix ON api_keys (key_prefix);
-CREATE INDEX idx_api_keys_client ON api_keys (client_id);
+CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys (key_prefix);
+CREATE INDEX IF NOT EXISTS idx_api_keys_client ON api_keys (client_id);
 
 -- ============================================================
 -- SECTION 6: WEBHOOK ENDPOINTS AND DELIVERIES
 -- ============================================================
 
-CREATE TABLE webhook_endpoints (
+CREATE TABLE IF NOT EXISTS webhook_endpoints (
   id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id UUID NOT NULL REFERENCES clients(id),
   url       TEXT NOT NULL,
@@ -556,9 +568,9 @@ CREATE TABLE webhook_endpoints (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_webhook_endpoints_client ON webhook_endpoints (client_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_endpoints_client ON webhook_endpoints (client_id);
 
-CREATE TABLE webhook_deliveries (
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   endpoint_id UUID NOT NULL REFERENCES webhook_endpoints(id),
   client_id   UUID NOT NULL REFERENCES clients(id), -- denormalized for RLS
@@ -579,9 +591,9 @@ CREATE TABLE webhook_deliveries (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_webhook_deliveries_retry ON webhook_deliveries (next_retry_at)
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_retry ON webhook_deliveries (next_retry_at)
   WHERE status IN ('pending', 'failed');
-CREATE INDEX idx_webhook_deliveries_client ON webhook_deliveries (client_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_client ON webhook_deliveries (client_id);
 
 -- ============================================================
 -- SECTION 7: COMMUNICATION PROFILES
@@ -591,7 +603,7 @@ CREATE INDEX idx_webhook_deliveries_client ON webhook_deliveries (client_id);
 -- chicken-and-egg insert order.
 -- ============================================================
 
-CREATE TABLE communication_profiles (
+CREATE TABLE IF NOT EXISTS communication_profiles (
   id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id          UUID NOT NULL REFERENCES clients(id) UNIQUE,
   level              INTEGER NOT NULL DEFAULT 1 CHECK (level IN (1, 2, 3)),
@@ -601,7 +613,7 @@ CREATE TABLE communication_profiles (
   updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE TABLE communication_profile_versions (
+CREATE TABLE IF NOT EXISTS communication_profile_versions (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   profile_id     UUID NOT NULL REFERENCES communication_profiles(id),
   client_id      UUID NOT NULL REFERENCES clients(id), -- denormalized for RLS
@@ -625,13 +637,17 @@ CREATE TABLE communication_profile_versions (
 );
 
 -- Deferred FK resolves the circular reference
-ALTER TABLE communication_profiles
-  ADD CONSTRAINT fk_current_version
-  FOREIGN KEY (current_version_id)
-  REFERENCES communication_profile_versions(id)
-  DEFERRABLE INITIALLY DEFERRED;
+DO $$
+BEGIN
+  ALTER TABLE communication_profiles
+    ADD CONSTRAINT fk_current_version
+    FOREIGN KEY (current_version_id)
+    REFERENCES communication_profile_versions(id)
+    DEFERRABLE INITIALLY DEFERRED;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE INDEX idx_profile_versions_profile ON communication_profile_versions (profile_id, version_number DESC);
+CREATE INDEX IF NOT EXISTS idx_profile_versions_profile ON communication_profile_versions (profile_id, version_number DESC);
 
 -- ============================================================
 -- SECTION 8: VOICE PROFILES (Coqui XTTS v2)
@@ -639,7 +655,7 @@ CREATE INDEX idx_profile_versions_profile ON communication_profile_versions (pro
 -- Premium clients have their own voice_profile row.
 -- ============================================================
 
-CREATE TABLE voice_profiles (
+CREATE TABLE IF NOT EXISTS voice_profiles (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id         UUID REFERENCES clients(id), -- NULL = default shared voice
   name              TEXT NOT NULL,
@@ -658,13 +674,20 @@ CREATE TABLE voice_profiles (
 
 -- Default ERA Comms voice — operator records and clones after first deploy
 INSERT INTO voice_profiles (client_id, name, level, model_type, status)
-VALUES (NULL, 'ERA Default Voice', 'default', 'xtts_v2', 'pending');
+SELECT NULL, 'ERA Default Voice', 'default', 'xtts_v2', 'pending'
+WHERE NOT EXISTS (
+  SELECT 1 FROM voice_profiles WHERE name = 'ERA Default Voice' AND client_id IS NULL
+);
 
 -- Now safe to add voice_profile_id FK to clients
-ALTER TABLE clients
-  ADD CONSTRAINT fk_voice_profile
-  FOREIGN KEY (voice_profile_id)
-  REFERENCES voice_profiles(id);
+DO $$
+BEGIN
+  ALTER TABLE clients
+    ADD CONSTRAINT fk_voice_profile
+    FOREIGN KEY (voice_profile_id)
+    REFERENCES voice_profiles(id);
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- ============================================================
 -- SECTION 9: WHATSAPP SESSIONS
@@ -674,7 +697,7 @@ ALTER TABLE clients
 -- storage. Redis is the fast-path cache; PostgreSQL is recovery truth.
 -- ============================================================
 
-CREATE TABLE whatsapp_sessions (
+CREATE TABLE IF NOT EXISTS whatsapp_sessions (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id    UUID NOT NULL REFERENCES clients(id),
   phone_number TEXT NOT NULL UNIQUE,
@@ -722,9 +745,9 @@ CREATE TABLE whatsapp_sessions (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_sessions_client  ON whatsapp_sessions (client_id);
-CREATE INDEX idx_sessions_status  ON whatsapp_sessions (status);
-CREATE INDEX idx_sessions_primary ON whatsapp_sessions (primary_session_id)
+CREATE INDEX IF NOT EXISTS idx_sessions_client  ON whatsapp_sessions (client_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_status  ON whatsapp_sessions (status);
+CREATE INDEX IF NOT EXISTS idx_sessions_primary ON whatsapp_sessions (primary_session_id)
   WHERE primary_session_id IS NOT NULL;
 
 -- ============================================================
@@ -735,7 +758,7 @@ CREATE INDEX idx_sessions_primary ON whatsapp_sessions (primary_session_id)
 -- skip_warmup = TRUE grants full capacity from day one.
 -- ============================================================
 
-CREATE TABLE warmup_profiles (
+CREATE TABLE IF NOT EXISTS warmup_profiles (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id UUID NOT NULL REFERENCES whatsapp_sessions(id) UNIQUE,
   client_id  UUID NOT NULL REFERENCES clients(id), -- denormalized for RLS
@@ -771,7 +794,7 @@ CREATE TABLE warmup_profiles (
 -- No opt-out column — opt-out handling is the connected system's concern.
 -- ============================================================
 
-CREATE TABLE contacts (
+CREATE TABLE IF NOT EXISTS contacts (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id    UUID NOT NULL REFERENCES clients(id),
   phone_number TEXT NOT NULL,
@@ -787,7 +810,7 @@ CREATE TABLE contacts (
   UNIQUE (client_id, phone_number)
 );
 
-CREATE INDEX idx_contacts_client ON contacts (client_id);
+CREATE INDEX IF NOT EXISTS idx_contacts_client ON contacts (client_id);
 
 -- ============================================================
 -- SECTION 12: CONVERSATIONS
@@ -795,7 +818,7 @@ CREATE INDEX idx_contacts_client ON contacts (client_id);
 -- ai_active controls whether the AI responds. Set to FALSE on escalation.
 -- ============================================================
 
-CREATE TABLE conversations (
+CREATE TABLE IF NOT EXISTS conversations (
   id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id          UUID NOT NULL REFERENCES clients(id),
   contact_id         UUID NOT NULL REFERENCES contacts(id),
@@ -821,9 +844,9 @@ CREATE TABLE conversations (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_conversations_client  ON conversations (client_id);
-CREATE INDEX idx_conversations_contact ON conversations (contact_id, created_at DESC);
-CREATE INDEX idx_conversations_open    ON conversations (client_id, status)
+CREATE INDEX IF NOT EXISTS idx_conversations_client  ON conversations (client_id);
+CREATE INDEX IF NOT EXISTS idx_conversations_contact ON conversations (contact_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_conversations_open    ON conversations (client_id, status)
   WHERE status != 'closed';
 
 -- ============================================================
@@ -834,7 +857,7 @@ CREATE INDEX idx_conversations_open    ON conversations (client_id, status)
 -- conversations — these bypass AI variation and go out as written.
 -- ============================================================
 
-CREATE TABLE messages (
+CREATE TABLE IF NOT EXISTS messages (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id UUID NOT NULL REFERENCES conversations(id),
   client_id       UUID NOT NULL REFERENCES clients(id), -- denormalized for RLS
@@ -876,9 +899,9 @@ CREATE TABLE messages (
   UNIQUE (client_id, idempotency_key)
 );
 
-CREATE INDEX idx_messages_conversation ON messages (conversation_id, created_at ASC);
-CREATE INDEX idx_messages_wa_id        ON messages (wa_message_id) WHERE wa_message_id IS NOT NULL;
-CREATE INDEX idx_messages_queued       ON messages (scheduled_for)
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_messages_wa_id        ON messages (wa_message_id) WHERE wa_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_queued       ON messages (scheduled_for)
   WHERE status = 'queued' AND scheduled_for IS NOT NULL;
 
 -- ============================================================
@@ -886,7 +909,7 @@ CREATE INDEX idx_messages_queued       ON messages (scheduled_for)
 -- Append-only delivery receipt log. One row per status transition.
 -- ============================================================
 
-CREATE TABLE message_events (
+CREATE TABLE IF NOT EXISTS message_events (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   message_id UUID NOT NULL REFERENCES messages(id),
   client_id  UUID NOT NULL REFERENCES clients(id), -- denormalized for RLS
@@ -900,7 +923,7 @@ CREATE TABLE message_events (
   occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_message_events_message ON message_events (message_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_message_events_message ON message_events (message_id, occurred_at DESC);
 
 -- ============================================================
 -- SECTION 15: VOICE CALLS
@@ -908,7 +931,7 @@ CREATE INDEX idx_message_events_message ON message_events (message_id, occurred_
 -- transcript is JSONB array: [{role, text, timestamp}]
 -- ============================================================
 
-CREATE TABLE voice_calls (
+CREATE TABLE IF NOT EXISTS voice_calls (
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   client_id        UUID NOT NULL REFERENCES clients(id),
   contact_id       UUID NOT NULL REFERENCES contacts(id),
@@ -940,8 +963,8 @@ CREATE TABLE voice_calls (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_voice_calls_client  ON voice_calls (client_id, initiated_at DESC);
-CREATE INDEX idx_voice_calls_contact ON voice_calls (contact_id);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_client  ON voice_calls (client_id, initiated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_voice_calls_contact ON voice_calls (contact_id);
 
 -- ============================================================
 -- SECTION 16: USAGE EVENTS — TimescaleDB Hypertable
@@ -950,7 +973,7 @@ CREATE INDEX idx_voice_calls_contact ON voice_calls (contact_id);
 -- Partitioned by occurred_at.
 -- ============================================================
 
-CREATE TABLE usage_events (
+CREATE TABLE IF NOT EXISTS usage_events (
   id          UUID NOT NULL DEFAULT gen_random_uuid(),
   client_id   UUID NOT NULL REFERENCES clients(id),
 
@@ -974,15 +997,15 @@ CREATE TABLE usage_events (
   PRIMARY KEY (id, occurred_at)
 );
 
-SELECT create_hypertable('usage_events', 'occurred_at');
+SELECT create_hypertable('usage_events', 'occurred_at', if_not_exists => true);
 
-CREATE INDEX idx_usage_client_time ON usage_events (client_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_usage_client_time ON usage_events (client_id, occurred_at DESC);
 
 -- Raw events retained 90 days; aggregates are permanent
-SELECT add_retention_policy('usage_events', INTERVAL '90 days');
+SELECT add_retention_policy('usage_events', INTERVAL '90 days', if_not_exists => true);
 
 -- Hourly aggregate — used for dashboard and recent billing checks
-CREATE MATERIALIZED VIEW usage_hourly
+CREATE MATERIALIZED VIEW IF NOT EXISTS usage_hourly
 WITH (timescaledb.continuous) AS
 SELECT
   time_bucket('1 hour', occurred_at) AS bucket,
@@ -996,10 +1019,11 @@ GROUP BY 1, 2, 3;
 SELECT add_continuous_aggregate_policy('usage_hourly',
   start_offset => INTERVAL '3 hours',
   end_offset   => INTERVAL '1 hour',
-  schedule_interval => INTERVAL '1 hour');
+  schedule_interval => INTERVAL '1 hour',
+  if_not_exists => true);
 
 -- Daily aggregate — used for plan cap enforcement checks and reporting
-CREATE MATERIALIZED VIEW usage_daily
+CREATE MATERIALIZED VIEW IF NOT EXISTS usage_daily
 WITH (timescaledb.continuous) AS
 SELECT
   time_bucket('1 day', occurred_at) AS bucket,
@@ -1013,7 +1037,8 @@ GROUP BY 1, 2, 3;
 SELECT add_continuous_aggregate_policy('usage_daily',
   start_offset => INTERVAL '2 days',
   end_offset   => INTERVAL '1 day',
-  schedule_interval => INTERVAL '1 day');
+  schedule_interval => INTERVAL '1 day',
+  if_not_exists => true);
 
 -- ============================================================
 -- SECTION 17: SESSION HEALTH SNAPSHOTS — TimescaleDB Hypertable
@@ -1021,7 +1046,7 @@ SELECT add_continuous_aggregate_policy('usage_daily',
 -- Feeds the operator dashboard. Retained 30 days.
 -- ============================================================
 
-CREATE TABLE session_health_snapshots (
+CREATE TABLE IF NOT EXISTS session_health_snapshots (
   session_id           UUID NOT NULL REFERENCES whatsapp_sessions(id),
   status               TEXT NOT NULL,
   risk_score           DECIMAL(4,3) NOT NULL,
@@ -1034,9 +1059,9 @@ CREATE TABLE session_health_snapshots (
   PRIMARY KEY (session_id, snapshot_at)
 );
 
-SELECT create_hypertable('session_health_snapshots', 'snapshot_at');
+SELECT create_hypertable('session_health_snapshots', 'snapshot_at', if_not_exists => true);
 
-SELECT add_retention_policy('session_health_snapshots', INTERVAL '30 days');
+SELECT add_retention_policy('session_health_snapshots', INTERVAL '30 days', if_not_exists => true);
 
 -- ============================================================
 -- SECTION 18: ALERT HISTORY
@@ -1044,7 +1069,7 @@ SELECT add_retention_policy('session_health_snapshots', INTERVAL '30 days');
 -- No RLS needed — never exposed through client-facing API.
 -- ============================================================
 
-CREATE TABLE alert_history (
+CREATE TABLE IF NOT EXISTS alert_history (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   alert_type TEXT NOT NULL,
   severity   TEXT NOT NULL CHECK (severity IN ('warning', 'critical')),
@@ -1063,8 +1088,8 @@ CREATE TABLE alert_history (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_alerts_unresolved ON alert_history (created_at DESC) WHERE resolved_at IS NULL;
-CREATE INDEX idx_alerts_client     ON alert_history (client_id, created_at DESC)
+CREATE INDEX IF NOT EXISTS idx_alerts_unresolved ON alert_history (created_at DESC) WHERE resolved_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_alerts_client     ON alert_history (client_id, created_at DESC)
   WHERE client_id IS NOT NULL;
 
 -- ============================================================
@@ -1113,51 +1138,96 @@ RETURNS boolean LANGUAGE sql STABLE AS $$
   SELECT current_setting('app.current_client_id', TRUE) = '00000000-0000-0000-0000-000000000001'
 $$;
 
-CREATE POLICY client_isolation ON clients
-  USING (id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON clients
+    USING (id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON api_keys
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON api_keys
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON webhook_endpoints
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON webhook_endpoints
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON webhook_deliveries
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON webhook_deliveries
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON communication_profiles
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON communication_profiles
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON communication_profile_versions
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON communication_profile_versions
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- NULL client_id = default ERA voice, readable by all authenticated clients
-CREATE POLICY client_isolation ON voice_profiles
-  USING (client_id = current_client_id() OR client_id IS NULL OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON voice_profiles
+    USING (client_id = current_client_id() OR client_id IS NULL OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON whatsapp_sessions
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON whatsapp_sessions
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON warmup_profiles
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON warmup_profiles
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON contacts
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON contacts
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON conversations
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON conversations
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON messages
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON messages
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON message_events
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON message_events
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON voice_calls
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON voice_calls
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE POLICY client_isolation ON usage_events
-  USING (client_id = current_client_id() OR is_admin_context());
+DO $$ BEGIN
+  CREATE POLICY client_isolation ON usage_events
+    USING (client_id = current_client_id() OR is_admin_context());
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- ============================================================
 -- GRANT PERMISSIONS

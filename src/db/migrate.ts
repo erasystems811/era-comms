@@ -111,6 +111,10 @@ async function migrate(): Promise<void> {
       )
     `
 
+    // Exclusive advisory lock prevents concurrent migration runs (e.g. rolling deploys).
+    // Released automatically when the connection closes in the finally block.
+    await sql`SELECT pg_advisory_lock(7261952318)`
+
     const allFiles = await readdir(MIGRATIONS_DIR)
     const migrationFiles = allFiles
       .filter((f) => f.endsWith('.sql'))
