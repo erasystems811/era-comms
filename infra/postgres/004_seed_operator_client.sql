@@ -8,7 +8,7 @@
 
 INSERT INTO clients (id, name, type, plan_id, contact_email, status)
 SELECT
-  'c0ffee00-era0-4sys-a000-000000000001',
+  'c0ffee00-0000-4000-a000-000000000001',
   'ERA Systems',
   'internal',
   p.id,
@@ -19,5 +19,5 @@ WHERE p.name = 'internal'
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO module_config (client_id)
-VALUES ('c0ffee00-era0-4sys-a000-000000000001')
+VALUES ('c0ffee00-0000-4000-a000-000000000001')
 ON CONFLICT DO NOTHING;
