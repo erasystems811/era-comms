@@ -1,21 +1,12 @@
 // ── OPERATOR ADMIN ROUTES ─────────────────────────────────────
 //
-// ERA Systems operator API — manages clients, plans, and API keys.
+// ERA Systems operator API — manages clients, plans, sessions, and keys.
 // Authentication: X-Operator-Secret header (not client API keys).
 //
-// Clients never access these routes. ERA Systems operators use them
-// to onboard clients and provision API credentials.
-//
-// Routes:
-//   GET  /v1/admin/plans                  — list available plans
-//   POST /v1/admin/clients                — create a new client
-//   GET  /v1/admin/clients                — list all clients
-//   GET  /v1/admin/clients/:id            — client detail + live usage
-//   PATCH /v1/admin/clients/:id           — update client (e.g. plan change)
-//   POST /v1/admin/clients/:id/api-keys   — create API key for a client
-//   DELETE /v1/admin/api-keys/:keyId      — revoke an API key
+// Sub-plugins (from ./requests.ts and ./observability.ts) are registered
+// at the bottom and inherit the same /v1/admin prefix.
 
-import { randomBytes, createHash } from 'node:crypto'
+import { randomBytes, createHash, randomInt } from 'node:crypto'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { Redis } from 'ioredis'
 import { adminDb } from '../../db/client.js'
@@ -24,6 +15,8 @@ import { currentLimit } from '../../db/redis.js'
 import { invalidatePlanCache } from '../../services/plan.js'
 import { NotFoundError, ConflictError } from '../../shared/errors.js'
 import { CHANNEL } from '../../queues/definitions.js'
+import requestsRoutes from './requests.js'
+import observabilityRoutes from './observability.js'
 
 const E164_RE = /^\+[1-9]\d{6,14}$/
 
@@ -53,17 +46,26 @@ type PlanRow = {
   client_count: string
 }
 
-type ClientRow = {
-  id: string; name: string; type: string; status: string
+type ClientListRow = {
+  id: string; name: string; slug: string | null; type: string; status: string
   plan_id: string; plan_name: string
-  contact_email: string | null
+  contact_email: string | null; contact_phone: string | null
   created_at: string
+  session_count: string; monthly_messages: string
+}
+
+type SessionRow = {
+  id: string; phone_number: string; status: string; risk_score: string
+  role: string; created_at: string; last_heartbeat_at: Date | null
+  messages_sent_total: string; connected_at: Date | null; cooldown_until: Date | null
+  client_name: string; client_id: string
+  warmup_day: number | null; warmup_complete: boolean | null; skip_warmup: boolean | null
 }
 
 type ApiKeyRow = {
-  id: string; key_prefix: string; scopes: string[]
+  id: string; client_id: string; key_prefix: string; scopes: string[]
   environment: string; status: string
-  expires_at: string | null; created_at: string
+  expires_at: string | null; last_used_at: string | null; created_at: string
 }
 
 // ── Plugin ────────────────────────────────────────────────────
@@ -241,10 +243,12 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     const body = req.body as {
       name?: string
+      slug?: string
       type?: 'internal' | 'external'
       planId?: string
       categoryId?: string
       contactEmail?: string
+      contactPhone?: string
     }
 
     if (!body.name?.trim()) {
@@ -255,22 +259,25 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     }
 
     const type: 'internal' | 'external' = body.type === 'internal' ? 'internal' : 'external'
+    const slug = body.slug?.trim().toLowerCase().replace(/\s+/g, '-') || null
 
     type InsertRow = { id: string; created_at: string }
     const rows = (await adminDb`
-      INSERT INTO clients (name, type, plan_id, category_id, contact_email)
+      INSERT INTO clients (name, slug, type, plan_id, category_id, contact_email, contact_phone)
       VALUES (
         ${body.name.trim()},
+        ${slug},
         ${type},
         ${body.planId},
         ${body.categoryId ?? null},
-        ${body.contactEmail ?? null}
+        ${body.contactEmail ?? null},
+        ${body.contactPhone ?? null}
       )
       RETURNING id, created_at
     `) as unknown as InsertRow[]
 
     const row = rows[0]!
-    return reply.status(201).send({ id: row.id, name: body.name, type, createdAt: row.created_at })
+    return reply.status(201).send({ id: row.id, name: body.name.trim(), type, createdAt: row.created_at })
   })
 
   // ── GET /v1/admin/clients ───────────────────────────────────
@@ -279,21 +286,31 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!assertOperator(req, reply)) return
 
     const rows = (await adminDb`
-      SELECT c.id, c.name, c.type, c.status, c.plan_id,
-             p.name AS plan_name, c.contact_email, c.created_at
+      SELECT c.id, c.name, c.slug, c.type, c.status, c.plan_id,
+             p.name AS plan_name,
+             c.contact_email, c.contact_phone,
+             c.created_at,
+             COUNT(DISTINCT ws.id)::text AS session_count,
+             COALESCE(SUM(ws.messages_sent_total), 0)::text AS monthly_messages
       FROM   clients c
       JOIN   plans p ON p.id = c.plan_id
+      LEFT JOIN whatsapp_sessions ws ON ws.client_id = c.id
+      GROUP BY c.id, p.name
       ORDER BY c.created_at DESC
-    `) as unknown as ClientRow[]
+    `) as unknown as ClientListRow[]
 
     return rows.map(c => ({
-      id:           c.id,
-      name:         c.name,
-      type:         c.type,
-      status:       c.status,
-      plan:         { id: c.plan_id, name: c.plan_name },
-      contactEmail: c.contact_email,
-      createdAt:    c.created_at,
+      id:                  c.id,
+      name:                c.name,
+      slug:                c.slug ?? c.id.slice(0, 8),
+      planId:              c.plan_id,
+      planName:            c.plan_name,
+      active:              c.status === 'active',
+      sessionCount:        parseInt(c.session_count ?? '0', 10),
+      monthlyMessageCount: parseInt(c.monthly_messages ?? '0', 10),
+      createdAt:           c.created_at,
+      contactEmail:        c.contact_email,
+      contactPhone:        c.contact_phone,
     }))
   })
 
@@ -304,42 +321,121 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     const { id } = req.params as { id: string }
 
+    type ClientDetailRow = {
+      id: string; name: string; slug: string | null; type: string; status: string
+      plan_id: string; plan_name: string; plan_display: string
+      plan_billing_model: string; plan_monthly_fee: string | null
+      plan_monthly_cap: number | null; plan_daily_cap: number | null
+      plan_hourly_cap: number | null; plan_max_sessions: number | null
+      plan_ai_enabled: boolean; plan_voice_enabled: boolean; plan_analytics_enabled: boolean
+      contact_email: string | null; contact_phone: string | null
+      created_at: string
+      session_count: string; monthly_messages: string
+    }
+
     const rows = (await adminDb`
-      SELECT c.id, c.name, c.type, c.status, c.plan_id,
-             p.name AS plan_name, c.contact_email, c.created_at,
-             p.monthly_message_cap, p.daily_message_cap, p.hourly_message_cap
+      SELECT c.id, c.name, c.slug, c.type, c.status, c.plan_id,
+             p.name AS plan_name, p.display_name AS plan_display,
+             p.billing_model AS plan_billing_model, p.monthly_fee AS plan_monthly_fee,
+             p.monthly_message_cap AS plan_monthly_cap, p.daily_message_cap AS plan_daily_cap,
+             p.hourly_message_cap AS plan_hourly_cap, p.max_sessions AS plan_max_sessions,
+             p.ai_enabled AS plan_ai_enabled, p.voice_enabled AS plan_voice_enabled,
+             p.analytics_enabled AS plan_analytics_enabled,
+             c.contact_email, c.contact_phone, c.created_at,
+             COUNT(DISTINCT ws.id)::text AS session_count,
+             COALESCE(SUM(ws.messages_sent_total), 0)::text AS monthly_messages
       FROM   clients c
       JOIN   plans p ON p.id = c.plan_id
+      LEFT JOIN whatsapp_sessions ws ON ws.client_id = c.id
       WHERE  c.id = ${id}
-    `) as unknown as (ClientRow & {
-      monthly_message_cap: number | null
-      daily_message_cap: number | null
-      hourly_message_cap: number | null
-    })[]
+      GROUP BY c.id, p.id
+    `) as unknown as ClientDetailRow[]
 
     const client = rows[0]
     if (!client) throw new NotFoundError('Client')
 
-    // Live usage from Redis counters
-    const [hourly, daily, monthly] = await Promise.all([
-      currentLimit(id, 'hourly'),
-      currentLimit(id, 'daily'),
-      currentLimit(id, 'monthly'),
-    ])
+    type ClientSessionRow = {
+      id: string; phone_number: string; status: string; risk_score: string
+      role: string; created_at: string; last_heartbeat_at: Date | null
+      messages_sent_total: string; connected_at: Date | null; cooldown_until: Date | null
+      warmup_day: number | null; warmup_complete: boolean | null; skip_warmup: boolean | null
+    }
+
+    const sessionRows = (await adminDb`
+      SELECT ws.id, ws.phone_number, ws.status, ws.risk_score, ws.role,
+             ws.created_at, ws.last_heartbeat_at, ws.messages_sent_total,
+             ws.connected_at, ws.cooldown_until,
+             wp.current_day AS warmup_day, wp.is_complete AS warmup_complete, wp.skip_warmup
+      FROM   whatsapp_sessions ws
+      LEFT JOIN warmup_profiles wp ON wp.session_id = ws.id
+      WHERE  ws.client_id = ${id}
+      ORDER BY ws.created_at ASC
+    `) as unknown as ClientSessionRow[]
+
+    const keyRows = (await adminDb`
+      SELECT id, client_id, key_prefix, scopes, environment, status, expires_at, last_used_at, created_at
+      FROM   api_keys
+      WHERE  client_id = ${id}
+      ORDER BY created_at DESC
+    `) as unknown as ApiKeyRow[]
+
+    const monthly = await currentLimit(id, 'monthly')
+    const sessionsActive = sessionRows.filter(s => s.status === 'connected').length
 
     return {
-      id:           client.id,
-      name:         client.name,
-      type:         client.type,
-      status:       client.status,
-      plan:         { id: client.plan_id, name: client.plan_name },
-      contactEmail: client.contact_email,
-      createdAt:    client.created_at,
-      usage: {
-        messagesThisHour:  { used: hourly,  cap: client.hourly_message_cap  },
-        messagesThisDay:   { used: daily,   cap: client.daily_message_cap   },
-        messagesThisMonth: { used: monthly, cap: client.monthly_message_cap },
+      id:                  client.id,
+      name:                client.name,
+      slug:                client.slug ?? client.id.slice(0, 8),
+      planId:              client.plan_id,
+      planName:            client.plan_name,
+      active:              client.status === 'active',
+      sessionCount:        parseInt(client.session_count ?? '0', 10),
+      monthlyMessageCount: parseInt(client.monthly_messages ?? '0', 10),
+      createdAt:           client.created_at,
+      contactEmail:        client.contact_email,
+      contactPhone:        client.contact_phone,
+      plan: {
+        id:               client.plan_id,
+        name:             client.plan_name,
+        displayName:      client.plan_display,
+        aiEnabled:        client.plan_ai_enabled,
+        voiceEnabled:     client.plan_voice_enabled,
+        analyticsEnabled: client.plan_analytics_enabled,
+        billingModel:     client.plan_billing_model,
+        monthlyFee:       client.plan_monthly_fee ? parseFloat(client.plan_monthly_fee) : null,
+        limits: {
+          monthlyMessages: client.plan_monthly_cap,
+          dailyMessages:   client.plan_daily_cap,
+          hourlyMessages:  client.plan_hourly_cap,
+          maxSessions:     client.plan_max_sessions,
+        },
+        clientCount: 0,
       },
+      sessions: sessionRows.map(r => ({
+        id:                r.id,
+        phoneNumber:       r.phone_number,
+        status:            r.status,
+        riskScore:         parseFloat(r.risk_score),
+        role:              r.role,
+        createdAt:         r.created_at,
+        lastHeartbeatAt:   r.last_heartbeat_at,
+        messagesSentTotal: parseInt(r.messages_sent_total ?? '0', 10),
+        connectedAt:       r.connected_at,
+        cooldownUntil:     r.cooldown_until,
+        client:            { id: client.id, name: client.name },
+        warmup: { currentDay: r.warmup_day, isComplete: r.warmup_complete, skipWarmup: r.skip_warmup },
+      })),
+      apiKeys: keyRows.map(k => ({
+        id:         k.id,
+        clientId:   k.client_id,
+        label:      k.environment,
+        keyPreview: k.key_prefix,
+        scopes:     k.scopes,
+        active:     k.status === 'active',
+        lastUsedAt: k.last_used_at,
+        createdAt:  k.created_at,
+      })),
+      usage: { monthlyMessages: monthly, sessionsActive },
     }
   })
 
@@ -352,7 +448,10 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const body = req.body as {
       planId?: string
       status?: 'active' | 'suspended'
+      active?: boolean
+      name?: string
       contactEmail?: string
+      contactPhone?: string
     }
 
     const existing = (await adminDb`SELECT id FROM clients WHERE id = ${id}`) as unknown as Array<{ id: string }>
@@ -362,13 +461,39 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       await adminDb`UPDATE clients SET plan_id = ${body.planId}, updated_at = NOW() WHERE id = ${id}`
       await invalidatePlanCache(id)
     }
-    if (body.status) {
-      await adminDb`UPDATE clients SET status = ${body.status}, updated_at = NOW() WHERE id = ${id}`
+    const newStatus = body.status
+      ?? (body.active !== undefined ? (body.active ? 'active' : 'suspended') : undefined)
+    if (newStatus) {
+      await adminDb`UPDATE clients SET status = ${newStatus}, updated_at = NOW() WHERE id = ${id}`
+    }
+    if (body.name?.trim()) {
+      await adminDb`UPDATE clients SET name = ${body.name.trim()}, updated_at = NOW() WHERE id = ${id}`
     }
     if (body.contactEmail !== undefined) {
       await adminDb`UPDATE clients SET contact_email = ${body.contactEmail}, updated_at = NOW() WHERE id = ${id}`
     }
+    if (body.contactPhone !== undefined) {
+      await adminDb`UPDATE clients SET contact_phone = ${body.contactPhone}, updated_at = NOW() WHERE id = ${id}`
+    }
 
+    return reply.status(204).send()
+  })
+
+  // ── DELETE /v1/admin/clients/:id ────────────────────────────
+  // Soft-delete: marks as suspended to preserve audit trail and session history.
+
+  app.delete('/clients/:id', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id } = req.params as { id: string }
+    const rows = (await adminDb`SELECT id FROM clients WHERE id = ${id}`) as unknown as Array<{ id: string }>
+    if (!rows[0]) throw new NotFoundError('Client')
+
+    await adminDb`UPDATE clients SET status = 'suspended', updated_at = NOW() WHERE id = ${id}`
+    await adminDb`
+      INSERT INTO audit_log (actor, actor_label, action, target, target_id, detail)
+      VALUES ('operator', 'ERA Systems', 'deleted_client', 'client', ${id}, 'Client deleted via operator panel')
+    `
     return reply.status(204).send()
   })
 
@@ -381,6 +506,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const body = req.body as {
       scopes?: string[]
       environment?: 'live' | 'test'
+      label?: string
       expiresAt?: string
     }
 
@@ -395,11 +521,9 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     const environment: 'live' | 'test' = body.environment === 'test' ? 'test' : 'live'
 
-    // Generate key — raw key is returned once and never stored
     const rawKey  = `era_${randomBytes(24).toString('hex')}`
     const keyHash = createHash('sha256').update(rawKey).digest('hex')
     const prefix  = rawKey.slice(0, 12)
-
     const expiresAt = body.expiresAt ? new Date(body.expiresAt) : null
 
     type KeyInsertRow = { id: string; created_at: string }
@@ -411,13 +535,13 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     const row = rows[0]!
     return reply.status(201).send({
-      id:          row.id,
-      key:         rawKey,       // shown ONCE — client must store this
-      keyPrefix:   prefix,
+      id:        row.id,
+      key:       rawKey,
+      keyPrefix: prefix,
       scopes,
       environment,
-      expiresAt:   body.expiresAt ?? null,
-      createdAt:   row.created_at,
+      expiresAt: body.expiresAt ?? null,
+      createdAt: row.created_at,
     })
   })
 
@@ -429,20 +553,21 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const { id: clientId } = req.params as { id: string }
 
     const rows = (await adminDb`
-      SELECT id, key_prefix, scopes, environment, status, expires_at, created_at
+      SELECT id, client_id, key_prefix, scopes, environment, status, expires_at, last_used_at, created_at
       FROM   api_keys
       WHERE  client_id = ${clientId}
       ORDER BY created_at DESC
     `) as unknown as ApiKeyRow[]
 
     return rows.map(k => ({
-      id:          k.id,
-      keyPrefix:   k.key_prefix,
-      scopes:      k.scopes,
-      environment: k.environment,
-      status:      k.status,
-      expiresAt:   k.expires_at,
-      createdAt:   k.created_at,
+      id:         k.id,
+      clientId:   k.client_id,
+      label:      k.environment,
+      keyPreview: k.key_prefix,
+      scopes:     k.scopes,
+      active:     k.status === 'active',
+      lastUsedAt: k.last_used_at,
+      createdAt:  k.created_at,
     }))
   })
 
@@ -463,19 +588,36 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(204).send()
   })
 
-  // ── GET /v1/admin/sessions ──────────────────────────────────────
-  // All WhatsApp sessions across all clients with warmup + health.
+  // ── POST /v1/admin/clients/:clientId/api-keys/:keyId/send-secure-link ──
+
+  app.post('/clients/:clientId/api-keys/:keyId/send-secure-link', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { clientId, keyId } = req.params as { clientId: string; keyId: string }
+
+    const clients = (await adminDb`
+      SELECT id, contact_email, name FROM clients WHERE id = ${clientId}
+    `) as unknown as Array<{ id: string; contact_email: string | null; name: string }>
+    if (!clients[0]) throw new NotFoundError('Client')
+
+    const keys = (await adminDb`
+      SELECT id FROM api_keys WHERE id = ${keyId} AND client_id = ${clientId} AND status = 'active'
+    `) as unknown as Array<{ id: string }>
+    if (!keys[0]) throw new NotFoundError('API key')
+
+    await adminDb`
+      INSERT INTO audit_log (actor, actor_label, action, target, target_id, detail)
+      VALUES ('operator', 'ERA Systems', 'sent_api_key_link', 'api_key', ${keyId},
+        ${'Secure link requested for ' + (clients[0]!.contact_email ?? 'no email on file')})
+    `
+
+    return reply.status(204).send()
+  })
+
+  // ── GET /v1/admin/sessions ──────────────────────────────────
 
   app.get('/sessions', async (req, reply) => {
     if (!assertOperator(req, reply)) return
-
-    type SessionRow = {
-      id: string; phone_number: string; status: string; risk_score: string
-      role: string; created_at: string; last_heartbeat_at: Date | null
-      messages_sent_total: string; connected_at: Date | null
-      cooldown_until: Date | null; client_name: string; client_id: string
-      warmup_day: number | null; warmup_complete: boolean | null; skip_warmup: boolean | null
-    }
 
     const rows = (await adminDb`
       SELECT ws.id, ws.phone_number, ws.status, ws.risk_score, ws.role,
@@ -502,16 +644,44 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       connectedAt:       r.connected_at,
       cooldownUntil:     r.cooldown_until,
       client:            { id: r.client_id, name: r.client_name },
-      warmup: {
-        currentDay:  r.warmup_day,
-        isComplete:  r.warmup_complete,
-        skipWarmup:  r.skip_warmup,
-      },
+      warmup: { currentDay: r.warmup_day, isComplete: r.warmup_complete, skipWarmup: r.skip_warmup },
     }))
   })
 
-  // ── POST /v1/admin/sessions ─────────────────────────────────────
-  // Create a new WhatsApp session for a client and start the worker.
+  // ── GET /v1/admin/sessions/master ──────────────────────────
+  // ERA Systems own WhatsApp session (type='internal' client) used for OTPs.
+
+  app.get('/sessions/master', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const rows = (await adminDb`
+      SELECT ws.id, ws.phone_number, ws.status, ws.risk_score, ws.role,
+             ws.created_at, ws.last_heartbeat_at, ws.messages_sent_total,
+             ws.connected_at, ws.cooldown_until,
+             c.name AS client_name, c.id AS client_id,
+             wp.current_day AS warmup_day, wp.is_complete AS warmup_complete, wp.skip_warmup
+      FROM   whatsapp_sessions ws
+      JOIN   clients c ON c.id = ws.client_id AND c.type = 'internal'
+      LEFT JOIN warmup_profiles wp ON wp.session_id = ws.id
+      ORDER BY ws.created_at ASC
+      LIMIT 1
+    `) as unknown as SessionRow[]
+
+    if (!rows[0]) return reply.send(null)
+
+    const r = rows[0]
+    return {
+      id: r.id, phoneNumber: r.phone_number, status: r.status,
+      riskScore: parseFloat(r.risk_score), role: r.role,
+      createdAt: r.created_at, lastHeartbeatAt: r.last_heartbeat_at,
+      messagesSentTotal: parseInt(r.messages_sent_total ?? '0', 10),
+      connectedAt: r.connected_at, cooldownUntil: r.cooldown_until,
+      client: { id: r.client_id, name: r.client_name },
+      warmup: { currentDay: r.warmup_day, isComplete: r.warmup_complete, skipWarmup: r.skip_warmup },
+    }
+  })
+
+  // ── POST /v1/admin/sessions ─────────────────────────────────
 
   app.post('/sessions', async (req, reply) => {
     if (!assertOperator(req, reply)) return
@@ -561,8 +731,60 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(201).send({ id: sessionId, phoneNumber, role, status: 'pending_qr' })
   })
 
-  // ── DELETE /v1/admin/sessions/:id ──────────────────────────────
-  // Stop and disconnect a running session.
+  // ── POST /v1/admin/sessions/otp/send ───────────────────────
+
+  app.post('/sessions/otp/send', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const body = req.body as { phoneNumber?: string }
+    if (!body.phoneNumber) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'phoneNumber is required' })
+    }
+
+    const code = String(randomInt(100000, 999999))
+    const rows = (await adminDb`
+      INSERT INTO otp_sessions (phone_number, code) VALUES (${body.phoneNumber}, ${code}) RETURNING id
+    `) as unknown as Array<{ id: string }>
+
+    req.log.info({ phoneNumber: body.phoneNumber, code }, 'OTP generated (WhatsApp delivery pending)')
+
+    return reply.status(201).send({ otpId: rows[0]!.id })
+  })
+
+  // ── POST /v1/admin/sessions/otp/verify ─────────────────────
+
+  app.post('/sessions/otp/verify', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const body = req.body as { otpId?: string; code?: string }
+    if (!body.otpId || !body.code) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'otpId and code are required' })
+    }
+
+    const rows = (await adminDb`
+      SELECT id, code, phone_number, used, expires_at FROM otp_sessions WHERE id = ${body.otpId}
+    `) as unknown as Array<{ id: string; code: string; phone_number: string; used: boolean; expires_at: Date }>
+
+    const otp = rows[0]
+    if (!otp) return reply.status(404).send({ error: 'NOT_FOUND', message: 'OTP session not found' })
+    if (otp.used) return reply.status(400).send({ error: 'OTP_USED', message: 'This OTP has already been used' })
+    if (new Date() > new Date(otp.expires_at)) {
+      return reply.status(400).send({ error: 'OTP_EXPIRED', message: 'OTP has expired. Request a new one.' })
+    }
+    if (otp.code !== body.code) {
+      return reply.status(400).send({ error: 'INVALID_CODE', message: 'Incorrect code. Please try again.' })
+    }
+
+    await adminDb`UPDATE otp_sessions SET used = TRUE WHERE id = ${body.otpId}`
+
+    const sessions = (await adminDb`
+      SELECT id FROM whatsapp_sessions WHERE phone_number = ${otp.phone_number} ORDER BY created_at DESC LIMIT 1
+    `) as unknown as Array<{ id: string }>
+
+    return reply.send({ sessionId: sessions[0]?.id ?? null, verified: true, phoneNumber: otp.phone_number })
+  })
+
+  // ── DELETE /v1/admin/sessions/:id ──────────────────────────
 
   app.delete('/sessions/:id', async (req, reply) => {
     if (!assertOperator(req, reply)) return
@@ -575,8 +797,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(204).send()
   })
 
-  // ── GET /v1/admin/sessions/:id/qr (WebSocket) ──────────────────
-  // Streams QR code events for a session. Auth via ?secret= param.
+  // ── GET /v1/admin/sessions/:id/qr (WebSocket) ──────────────
 
   app.get('/sessions/:id/qr', { websocket: true }, (stream, req) => {
     const ws = stream.socket
@@ -602,8 +823,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     })()
   })
 
-  // ── GET /v1/admin/monitoring ────────────────────────────────────
-  // System-wide health snapshot for the operator dashboard.
+  // ── GET /v1/admin/monitoring ────────────────────────────────
 
   app.get('/monitoring', async (req, reply) => {
     if (!assertOperator(req, reply)) return
@@ -641,8 +861,68 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     }
   })
 
-  // ── GET /v1/admin/alerts ────────────────────────────────────────
-  // Full alert history for the notification panel.
+  // ── GET /v1/admin/monitoring/snapshot ──────────────────────
+  // Live system health snapshot consumed by the CommsDashboard page.
+
+  app.get('/monitoring/snapshot', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const allHealth = await req.server.supervisor.getAllHealth()
+
+    const counts = allHealth.reduce((acc: Record<string, number>, h) => {
+      acc[h.status] = (acc[h.status] ?? 0) + 1; return acc
+    }, {})
+
+    type EventCountRow = { event_type: string; total: string }
+    type CountRow = { total: string }
+
+    // platform_events may not exist until migration 002 runs
+    let evRows: EventCountRow[] = []
+    try {
+      evRows = (await adminDb`
+        SELECT event_type, COUNT(*)::text AS total
+        FROM platform_events
+        WHERE created_at >= NOW() - INTERVAL '24 hours'
+        GROUP BY event_type
+      `) as unknown as EventCountRow[]
+    } catch { /* table not yet created */ }
+
+    const msgIn  = evRows.filter(r => r.event_type === 'message_received').reduce((s, r) => s + parseInt(r.total), 0)
+    const msgOut = evRows.filter(r => r.event_type === 'message_sent').reduce((s, r) => s + parseInt(r.total), 0)
+
+    const [convRows, handoffRows, criticalRows, warningRows] = await Promise.all([
+      adminDb`SELECT COUNT(*)::text AS total FROM conversations WHERE ai_active = TRUE AND status = 'active'` as unknown as Promise<CountRow[]>,
+      adminDb`SELECT COUNT(*)::text AS total FROM conversations WHERE status = 'escalated'` as unknown as Promise<CountRow[]>,
+      adminDb`SELECT COUNT(*)::text AS total FROM alert_history WHERE resolved_at IS NULL AND severity = 'critical'` as unknown as Promise<CountRow[]>,
+      adminDb`SELECT COUNT(*)::text AS total FROM alert_history WHERE resolved_at IS NULL AND severity = 'warning'` as unknown as Promise<CountRow[]>,
+    ])
+
+    return {
+      sessions: {
+        total:        allHealth.length,
+        connected:    counts['connected']    ?? 0,
+        disconnected: counts['disconnected'] ?? 0,
+        warning:      (counts['flagged'] ?? 0) + (counts['cooldown'] ?? 0),
+      },
+      messages: {
+        lastHour:   msgIn + msgOut,
+        today:      msgIn + msgOut,
+        processing: 0,
+      },
+      ai: {
+        activeConversations: parseInt(convRows[0]?.total ?? '0', 10),
+        handoffsInProgress:  parseInt(handoffRows[0]?.total ?? '0', 10),
+        errorsLastHour:      0,
+      },
+      alerts: {
+        critical: parseInt(criticalRows[0]?.total ?? '0', 10),
+        warning:  parseInt(warningRows[0]?.total ?? '0', 10),
+      },
+      updatedAt: new Date().toISOString(),
+    }
+  })
+
+  // ── GET /v1/admin/alerts ────────────────────────────────────
 
   app.get('/alerts', async (req, reply) => {
     if (!assertOperator(req, reply)) return
@@ -673,6 +953,83 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       createdAt:  a.created_at,
     }))
   })
+
+  // ── GET /v1/admin/platform-alerts ──────────────────────────
+  // Full alert list with optional ?resolved=true|false filter.
+
+  app.get('/platform-alerts', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const query = req.query as { resolved?: string }
+    const resolvedFilter = query.resolved === 'true' ? true : query.resolved === 'false' ? false : null
+
+    type AlertRow = {
+      id: string; alert_type: string; severity: string; message: string
+      client_id: string | null; client_name: string | null
+      session_id: string | null; resolved_at: Date | null; created_at: string
+    }
+
+    let rows: AlertRow[]
+    if (resolvedFilter === null) {
+      rows = (await adminDb`
+        SELECT ah.id, ah.alert_type, ah.severity, ah.message,
+               ah.client_id, c.name AS client_name, ah.session_id, ah.resolved_at, ah.created_at
+        FROM alert_history ah LEFT JOIN clients c ON c.id = ah.client_id
+        ORDER BY ah.created_at DESC LIMIT 200
+      `) as unknown as AlertRow[]
+    } else if (resolvedFilter) {
+      rows = (await adminDb`
+        SELECT ah.id, ah.alert_type, ah.severity, ah.message,
+               ah.client_id, c.name AS client_name, ah.session_id, ah.resolved_at, ah.created_at
+        FROM alert_history ah LEFT JOIN clients c ON c.id = ah.client_id
+        WHERE ah.resolved_at IS NOT NULL
+        ORDER BY ah.created_at DESC LIMIT 100
+      `) as unknown as AlertRow[]
+    } else {
+      rows = (await adminDb`
+        SELECT ah.id, ah.alert_type, ah.severity, ah.message,
+               ah.client_id, c.name AS client_name, ah.session_id, ah.resolved_at, ah.created_at
+        FROM alert_history ah LEFT JOIN clients c ON c.id = ah.client_id
+        WHERE ah.resolved_at IS NULL
+        ORDER BY ah.created_at DESC LIMIT 100
+      `) as unknown as AlertRow[]
+    }
+
+    return rows.map(a => ({
+      id:           a.id,
+      type:         a.alert_type,
+      severity:     a.severity,
+      message:      a.message,
+      businessId:   a.client_id,
+      businessName: a.client_name,
+      sessionId:    a.session_id,
+      resolved:     !!a.resolved_at,
+      resolvedAt:   a.resolved_at,
+      createdAt:    a.created_at,
+    }))
+  })
+
+  // ── POST /v1/admin/platform-alerts/:id/resolve ─────────────
+
+  app.post('/platform-alerts/:id/resolve', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id } = req.params as { id: string }
+    const rows = (await adminDb`
+      UPDATE alert_history SET resolved_at = NOW()
+      WHERE id = ${id} AND resolved_at IS NULL RETURNING id
+    `) as unknown as Array<{ id: string }>
+    if (!rows[0]) throw new NotFoundError('Alert')
+    return reply.status(204).send()
+  })
+
+  // ── Sub-plugins ─────────────────────────────────────────────
+  // requests.ts      → /requests, /requests/:id/approve, /requests/:id/reject
+  //                    /ai-templates, /ai-templates/:id
+  // observability.ts → /events, /audit, /usage, /usage/:businessId, /investigate
+
+  await app.register(requestsRoutes)
+  await app.register(observabilityRoutes)
 }
 
 export default adminRoutes
