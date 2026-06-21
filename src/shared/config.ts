@@ -31,6 +31,10 @@ const schema = z.object({
   // The ERA Systems internal client — pre-seeded, used for self-alerting
   OPERATOR_INTERNAL_CLIENT_ID: z.string().uuid().optional(),
 
+  // Email delivery via Resend (optional — email features degrade gracefully if unset)
+  RESEND_API_KEY: z.string().optional(),
+  EMAIL_FROM: z.string().email().optional().default('noreply@erasystems.com.ng'),
+
   // Voice infrastructure
   SIP_TRUNK_HOST: z.string().optional(),
   SIP_TRUNK_USERNAME: z.string().optional(),
@@ -89,6 +93,11 @@ export const config = Object.freeze({
   },
 
   operatorSecret: env.OPERATOR_SECRET,
+
+  email: {
+    resendApiKey: env.RESEND_API_KEY,
+    from: env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
+  },
 
   monitoring: {
     alertWhatsappNumber: env.ALERT_WHATSAPP_NUMBER,

@@ -19,6 +19,7 @@ import { promisify } from 'node:util'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { adminDb } from '../../db/client.js'
 import { config } from '../../shared/config.js'
+import { sendEmail, portalAccessEmail } from '../../shared/email.js'
 import { NotFoundError } from '../../shared/errors.js'
 
 const scryptAsync = promisify(scrypt)
@@ -192,6 +193,20 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
         ${'Approved and created client account ' + clientId + ' for ' + request.business_name}
       )
     `
+
+    // Email the business owner their portal access details
+    const portalUrl = config.isProduction
+      ? 'https://era-hub.up.railway.app'
+      : 'http://localhost:5173'
+
+    sendEmail(portalAccessEmail({
+      businessName: request.business_name,
+      email:        request.contact_email,
+      portalUrl,
+    })).catch(err => {
+      // Non-fatal — operator still gets tempPassword to share manually
+      console.error('Portal access email failed:', err)
+    })
 
     // Return the temp password so operator can share it with the business owner
     return reply.status(201).send({ clientId, tempPassword })

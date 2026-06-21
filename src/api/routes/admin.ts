@@ -13,6 +13,8 @@ import { adminDb } from '../../db/client.js'
 import { config } from '../../shared/config.js'
 import { currentLimit } from '../../db/redis.js'
 import { invalidatePlanCache } from '../../services/plan.js'
+import { sendMessage } from '../../services/messaging.js'
+import { sendEmail, portalAccessEmail, apiKeyEmail } from '../../shared/email.js'
 import { NotFoundError, ConflictError } from '../../shared/errors.js'
 import { CHANNEL } from '../../queues/definitions.js'
 import requestsRoutes from './requests.js'
@@ -604,14 +606,29 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!clients[0]) throw new NotFoundError('Client')
 
     const keys = (await adminDb`
-      SELECT id FROM api_keys WHERE id = ${keyId} AND client_id = ${clientId} AND status = 'active'
-    `) as unknown as Array<{ id: string }>
+      SELECT id, label FROM api_keys WHERE id = ${keyId} AND client_id = ${clientId} AND status = 'active'
+    `) as unknown as Array<{ id: string; label: string }>
     if (!keys[0]) throw new NotFoundError('API key')
+
+    const client    = clients[0]!
+    const portalUrl = config.isProduction
+      ? 'https://era-hub.up.railway.app'
+      : 'http://localhost:5173'
+
+    // Send email if contact email is on file and Resend is configured
+    if (client.contact_email) {
+      sendEmail(apiKeyEmail({
+        businessName: client.name,
+        email:        client.contact_email,
+        portalUrl,
+        keyLabel:     keys[0].label || 'API Key',
+      })).catch(err => req.log.error({ err }, 'API key email failed'))
+    }
 
     await adminDb`
       INSERT INTO audit_log (actor, actor_label, action, target, target_id, detail)
       VALUES ('operator', 'ERA Systems', 'sent_api_key_link', 'api_key', ${keyId},
-        ${'Secure link requested for ' + (clients[0]!.contact_email ?? 'no email on file')})
+        ${'Secure link sent to ' + (client.contact_email ?? 'no email on file')})
     `
 
     return reply.status(204).send()
@@ -749,9 +766,33 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       INSERT INTO otp_sessions (phone_number, code) VALUES (${body.phoneNumber}, ${code}) RETURNING id
     `) as unknown as Array<{ id: string }>
 
-    req.log.info({ phoneNumber: body.phoneNumber, code }, 'OTP generated (WhatsApp delivery pending)')
+    const otpId = rows[0]!.id
 
-    return reply.status(201).send({ otpId: rows[0]!.id })
+    // Deliver via WhatsApp using the operator's master session
+    const internalClientId = config.monitoring.operatorInternalClientId
+    if (internalClientId) {
+      const sessions = (await adminDb`
+        SELECT id FROM whatsapp_sessions
+        WHERE  client_id = ${internalClientId} AND status = 'connected'
+        ORDER BY created_at ASC LIMIT 1
+      `) as unknown as Array<{ id: string }>
+
+      if (sessions[0]) {
+        sendMessage({
+          clientId:   internalClientId,
+          sessionId:  sessions[0].id,
+          to:         body.phoneNumber,
+          content:    `Your ERA Comms verification code is: *${code}*\n\nExpires in 10 minutes. Do not share it with anyone.`,
+          aiGenerated: false,
+        }).catch(err => req.log.error({ err }, 'OTP WhatsApp delivery failed'))
+      } else {
+        req.log.warn({ phoneNumber: body.phoneNumber, code }, 'OTP generated but no connected master session — code logged for manual delivery')
+      }
+    } else {
+      req.log.warn({ phoneNumber: body.phoneNumber, code }, 'OTP generated — OPERATOR_INTERNAL_CLIENT_ID not set, code logged for manual delivery')
+    }
+
+    return reply.status(201).send({ otpId })
   })
 
   // ── POST /v1/admin/sessions/otp/verify ─────────────────────
