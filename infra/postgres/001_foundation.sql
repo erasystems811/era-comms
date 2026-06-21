@@ -9,22 +9,39 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 CREATE EXTENSION IF NOT EXISTS "timescaledb";
 
 -- APPLICATION ROLES
+-- On managed cloud databases (Timescale Cloud, RDS, Supabase, etc.) the
+-- connecting user may not have CREATEROLE or superuser, so all role
+-- management is best-effort and skipped gracefully on permission errors.
 DO $$ BEGIN
   CREATE ROLE era_app;
 EXCEPTION WHEN duplicate_object THEN NULL;
+         WHEN insufficient_privilege THEN
+  RAISE NOTICE 'Cannot CREATE ROLE era_app — skipping (managed DB)';
 END $$;
 
 DO $$ BEGIN
   CREATE ROLE era_admin;
 EXCEPTION WHEN duplicate_object THEN NULL;
+         WHEN insufficient_privilege THEN
+  RAISE NOTICE 'Cannot CREATE ROLE era_admin — skipping (managed DB)';
 END $$;
 
 DO $$ BEGIN
   CREATE ROLE era_readonly;
 EXCEPTION WHEN duplicate_object THEN NULL;
+         WHEN insufficient_privilege THEN
+  RAISE NOTICE 'Cannot CREATE ROLE era_readonly — skipping (managed DB)';
 END $$;
 
-ALTER ROLE era_admin BYPASSRLS;
+-- Requires superuser or the connecting user to itself have BYPASSRLS.
+-- On Timescale Cloud connect as tsdbadmin to apply this; otherwise skipped.
+DO $$ BEGIN
+  ALTER ROLE era_admin BYPASSRLS;
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'Cannot ALTER ROLE era_admin BYPASSRLS — skipping (managed DB). Ensure your app DB user has BYPASSRLS or connect adminDb as tsdbadmin.';
+         WHEN undefined_object THEN
+  RAISE NOTICE 'Role era_admin does not exist — skipping BYPASSRLS (managed DB)';
+END $$;
 
 -- ============================================================
 -- SECTION 1: PLANS
@@ -1141,10 +1158,31 @@ CREATE POLICY client_isolation ON usage_events
 
 -- ============================================================
 -- GRANT PERMISSIONS
+-- Skipped gracefully on managed databases where the roles do not exist.
 -- ============================================================
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO era_app;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO era_readonly;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO era_admin;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO era_app;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO era_admin;
+DO $$ BEGIN
+  GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO era_app;
+  GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO era_app;
+EXCEPTION WHEN undefined_object THEN
+  RAISE NOTICE 'Role era_app not found — skipping grants (managed DB)';
+         WHEN insufficient_privilege THEN
+  RAISE NOTICE 'Cannot grant to era_app — skipping (managed DB)';
+END $$;
+
+DO $$ BEGIN
+  GRANT SELECT ON ALL TABLES IN SCHEMA public TO era_readonly;
+EXCEPTION WHEN undefined_object THEN
+  RAISE NOTICE 'Role era_readonly not found — skipping grants (managed DB)';
+         WHEN insufficient_privilege THEN
+  RAISE NOTICE 'Cannot grant to era_readonly — skipping (managed DB)';
+END $$;
+
+DO $$ BEGIN
+  GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO era_admin;
+  GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO era_admin;
+EXCEPTION WHEN undefined_object THEN
+  RAISE NOTICE 'Role era_admin not found — skipping grants (managed DB)';
+         WHEN insufficient_privilege THEN
+  RAISE NOTICE 'Cannot grant to era_admin — skipping (managed DB)';
+END $$;
