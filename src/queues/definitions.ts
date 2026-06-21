@@ -13,6 +13,7 @@ export const QUEUE = {
   ai: 'ai',
   webhooks: 'webhooks',
   analytics: 'analytics',
+  emailCampaign: 'email_campaign',
 } as const
 
 // ── REDIS CHANNELS (pub/sub) ──────────────────────────────────

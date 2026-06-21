@@ -15,6 +15,7 @@ import adminRoutes from './routes/admin.js'
 import publicRoutes from './routes/public.js'
 import businessRoutes from './routes/business.js'
 import metricsRoute from './routes/metrics-route.js'
+import emailRoutes  from './routes/email.js'
 import './types.js'
 
 export async function buildServer(supervisor: ISessionSupervisor) {
@@ -95,6 +96,9 @@ export async function buildServer(supervisor: ISessionSupervisor) {
 
   // Prometheus scrape endpoint — no auth (controlled at network level)
   await app.register(metricsRoute)
+
+  // Email module — operator routes + Postal webhook receiver
+  await app.register(emailRoutes, { prefix: '/v1/admin/email' })
 
   return app
 }
