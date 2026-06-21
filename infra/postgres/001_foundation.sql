@@ -1035,7 +1035,7 @@ FROM usage_events
 GROUP BY 1, 2, 3;
 
 SELECT add_continuous_aggregate_policy('usage_daily',
-  start_offset => INTERVAL '2 days',
+  start_offset => INTERVAL '3 days',
   end_offset   => INTERVAL '1 day',
   schedule_interval => INTERVAL '1 day',
   if_not_exists => true);
