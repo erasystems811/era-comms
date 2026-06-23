@@ -240,7 +240,15 @@ export class BaileysSession implements IWhatsAppSession {
           'WhatsApp session disconnected',
         )
         await this.updateDbStatus('disconnected')
-        // The supervisor handles reconnect with backoff — we don't retry here
+        // If QR listeners are still waiting (i.e. we disconnected before ever
+        // generating a QR), unblock them so the frontend shows an error rather
+        // than spinning forever. The supervisor will restart this worker.
+        if (this.qrListeners.length > 0) {
+          const reason = statusCode
+            ? `WhatsApp disconnected (code ${statusCode}). The worker will retry — please wait a moment then try again.`
+            : 'WhatsApp connection closed before a QR was generated. Please try again.'
+          this.emitQR({ type: 'error', reason })
+        }
       }
     }
   }
