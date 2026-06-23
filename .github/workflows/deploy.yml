@@ -1,22 +1,15 @@
-name: Deploy ERA Comms Config
+name: Deploy ERA Comms
 
 on:
   push:
     branches: [main]
 
+# Era-comms code changes are deployed via era-hub workflow.
+# When era-comms is updated, push to era-hub to trigger full server deploy.
+# The era-hub workflow SSHes into the server, pulls latest era-comms, and rebuilds Docker.
 jobs:
-  deploy:
+  notify:
     runs-on: ubuntu-latest
     steps:
-      - name: Apply config to server
-        uses: appleboy/ssh-action@master
-        with:
-          host: 46.101.83.26
-          username: root
-          password: ${{ secrets.SERVER_PASSWORD }}
-          script: |
-            cd /opt/era-comms
-            git pull origin main
-            cp /opt/era-comms/scripts/nginx.conf /etc/nginx/sites-available/era-comms
-            nginx -t && systemctl reload nginx
-            chmod -R 755 /var/www/era-hub/ 2>/dev/null || true
+      - name: Code pushed to era-comms
+        run: echo "Era-comms updated. Era-hub workflow will deploy on next push."
