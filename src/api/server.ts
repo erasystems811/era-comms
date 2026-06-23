@@ -16,6 +16,7 @@ import publicRoutes from './routes/public.js'
 import businessRoutes from './routes/business.js'
 import metricsRoute from './routes/metrics-route.js'
 import emailRoutes  from './routes/email.js'
+import { connectAdminRoutes, connectAgentRoutes } from './routes/connect.js'
 import './types.js'
 
 export async function buildServer(supervisor: ISessionSupervisor) {
@@ -34,7 +35,7 @@ export async function buildServer(supervisor: ISessionSupervisor) {
   await app.register(cors, {
     origin: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Operator-Secret', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Operator-Secret', 'X-Connect-Key', 'X-Connect-Username', 'X-Connect-Secret', 'Authorization'],
   })
 
   await app.register(websocketPlugin)
@@ -99,6 +100,10 @@ export async function buildServer(supervisor: ISessionSupervisor) {
 
   // Email module — operator routes + Postal webhook receiver
   await app.register(emailRoutes, { prefix: '/v1/admin/email' })
+
+  // ERA Connect — operator panel (era-hub) + agent telemetry (ERAConnect.exe)
+  await app.register(connectAdminRoutes, { prefix: '/v1/admin/connect' })
+  await app.register(connectAgentRoutes, { prefix: '/v1/connect' })
 
   return app
 }

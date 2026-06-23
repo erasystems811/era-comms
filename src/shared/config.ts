@@ -25,6 +25,9 @@ const schema = z.object({
   // Operator REST API secret — required for /v1/admin/* routes
   OPERATOR_SECRET: z.string().min(32, 'OPERATOR_SECRET must be at least 32 characters'),
 
+  // Shared secret baked into ERAConnect.exe — authenticates telemetry from hospital agents
+  CONNECT_SHARED_SECRET: z.string().default('era-connect-telemetry-v1'),
+
   // Operator alert destination
   ALERT_WHATSAPP_NUMBER: z.string().min(1, 'ALERT_WHATSAPP_NUMBER is required'),
 
@@ -99,6 +102,7 @@ export const config = Object.freeze({
   },
 
   operatorSecret: env.OPERATOR_SECRET,
+  connectSharedSecret: env.CONNECT_SHARED_SECRET,
 
   email: {
     resendApiKey:    env.RESEND_API_KEY,
