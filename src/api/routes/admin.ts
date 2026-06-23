@@ -580,7 +580,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const { keyId } = req.params as { keyId: string }
 
     const rows = (await adminDb`
-      UPDATE api_keys SET status = 'revoked' WHERE id = ${keyId} AND status = 'active'
+      DELETE FROM api_keys WHERE id = ${keyId}
       RETURNING id
     `) as unknown as Array<{ id: string }>
 
