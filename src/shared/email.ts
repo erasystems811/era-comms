@@ -15,6 +15,7 @@ function getTransport(): nodemailer.Transporter | null {
       port: smtpPort,
       secure: smtpPort === 465,
       auth: { user: smtpUser, pass: smtpPass },
+      tls: { rejectUnauthorized: false },
     })
   }
   return transport
