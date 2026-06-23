@@ -297,6 +297,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       FROM   clients c
       JOIN   plans p ON p.id = c.plan_id
       LEFT JOIN whatsapp_sessions ws ON ws.client_id = c.id
+      WHERE  c.type != 'internal'
       GROUP BY c.id, p.name
       ORDER BY c.created_at DESC
     `) as unknown as ClientListRow[]
@@ -349,7 +350,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       FROM   clients c
       JOIN   plans p ON p.id = c.plan_id
       LEFT JOIN whatsapp_sessions ws ON ws.client_id = c.id
-      WHERE  c.id = ${id}
+      WHERE  c.id = ${id} AND c.type != 'internal'
       GROUP BY c.id, p.id
     `) as unknown as ClientDetailRow[]
 
