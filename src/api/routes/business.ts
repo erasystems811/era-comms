@@ -80,6 +80,24 @@ async function ensureClientConfig(clientId: string) {
   ])
 }
 
+function mapModuleConfig(mod: {
+  knowledge_base: boolean; auto_greet: boolean; business_hours: boolean
+  scenarios: boolean; human_handoff: boolean; voice_notes: boolean
+  conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean
+}) {
+  return {
+    knowledgeBase:     mod.knowledge_base,
+    autoGreet:         mod.auto_greet,
+    businessHours:     mod.business_hours,
+    scenarios:         mod.scenarios,
+    humanHandoff:      mod.human_handoff,
+    voiceNotes:        mod.voice_notes,
+    conversationInbox: mod.conversation_inbox,
+    analytics:         mod.analytics,
+    emailCampaigns:    mod.email_campaigns,
+  }
+}
+
 // ── Plugin ──────────────────────────────────────────────────────
 
 const businessRoutes: FastifyPluginAsync = async (app) => {
@@ -128,7 +146,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
     type ModRow = {
       knowledge_base: boolean; auto_greet: boolean; business_hours: boolean
       scenarios: boolean; human_handoff: boolean; voice_notes: boolean
-      conversation_inbox: boolean; analytics: boolean
+      conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean
     }
     const mods = (await adminDb`SELECT * FROM module_config WHERE client_id = ${user.client_id}`) as unknown as ModRow[]
     const mod = mods[0]!
@@ -144,16 +162,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
         planName:     user.plan_display,
         active:       user.status === 'active',
         usage:        { monthlyMessages: 0, sessionsActive: 0, monthlyLimit: user.monthly_message_cap },
-        moduleConfig: {
-          knowledgeBase:     mod.knowledge_base,
-          autoGreet:         mod.auto_greet,
-          businessHours:     mod.business_hours,
-          scenarios:         mod.scenarios,
-          humanHandoff:      mod.human_handoff,
-          voiceNotes:        mod.voice_notes,
-          conversationInbox: mod.conversation_inbox,
-          analytics:         mod.analytics,
-        },
+        moduleConfig: mapModuleConfig(mod),
       },
     })
   })
@@ -208,7 +217,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
     type ModRow = {
       knowledge_base: boolean; auto_greet: boolean; business_hours: boolean
       scenarios: boolean; human_handoff: boolean; voice_notes: boolean
-      conversation_inbox: boolean; analytics: boolean
+      conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean
     }
     const mods    = (await adminDb`SELECT * FROM module_config WHERE client_id = ${auth.clientId}`) as unknown as ModRow[]
     const mod     = mods[0]!
@@ -224,16 +233,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
       planName:     c.plan_display,
       active:       c.status === 'active',
       usage:        { monthlyMessages: 0, sessionsActive: parseInt(sess[0]?.total ?? '0', 10), monthlyLimit: c.monthly_message_cap },
-      moduleConfig: {
-        knowledgeBase:     mod.knowledge_base,
-        autoGreet:         mod.auto_greet,
-        businessHours:     mod.business_hours,
-        scenarios:         mod.scenarios,
-        humanHandoff:      mod.human_handoff,
-        voiceNotes:        mod.voice_notes,
-        conversationInbox: mod.conversation_inbox,
-        analytics:         mod.analytics,
-      },
+      moduleConfig: mapModuleConfig(mod),
     })
   })
 
@@ -262,7 +262,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
     const b = req.body as Partial<{
       knowledgeBase: boolean; autoGreet: boolean; businessHours: boolean
       scenarios: boolean; humanHandoff: boolean; voiceNotes: boolean
-      conversationInbox: boolean; analytics: boolean
+      conversationInbox: boolean; analytics: boolean; emailCampaigns: boolean
     }>
 
     await adminDb`
@@ -275,6 +275,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
         voice_notes        = COALESCE(${b.voiceNotes       ?? null}, voice_notes),
         conversation_inbox = COALESCE(${b.conversationInbox ?? null}, conversation_inbox),
         analytics          = COALESCE(${b.analytics        ?? null}, analytics),
+        email_campaigns    = COALESCE(${b.emailCampaigns   ?? null}, email_campaigns),
         updated_at         = NOW()
       WHERE client_id = ${auth.clientId}
     `
@@ -738,6 +739,288 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
         updated_at              = NOW()
     `
     return reply.send({ whatsappHandoffAlerts: b.whatsappHandoffAlerts ?? true, emailDailyDigest: b.emailDailyDigest ?? false })
+  })
+
+  // ── Email: Domains (read-only — managed by operator) ──────────
+
+  app.get('/email/domains', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type DRow = { id: string; domain: string; spf_verified: boolean; dkim_verified: boolean; dmarc_verified: boolean }
+    const rows = (await adminDb`
+      SELECT id, domain, spf_verified, dkim_verified, dmarc_verified
+      FROM   email_domains WHERE client_id = ${auth.clientId}
+      ORDER BY created_at DESC
+    `) as unknown as DRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, domain: r.domain,
+      verified: r.spf_verified && r.dkim_verified && r.dmarc_verified,
+    })))
+  })
+
+  // ── Email: Templates ───────────────────────────────────────────
+
+  app.get('/email/templates', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type TRow = { id: string; name: string; subject: string; html_body: string; updated_at: string }
+    const rows = (await adminDb`
+      SELECT id, name, subject, html_body, updated_at
+      FROM   email_templates WHERE client_id = ${auth.clientId}
+      ORDER BY updated_at DESC
+    `) as unknown as TRow[]
+    return reply.send(rows.map(r => ({ id: r.id, name: r.name, subject: r.subject, htmlBody: r.html_body, updatedAt: r.updated_at })))
+  })
+
+  app.post('/email/templates', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { name, subject, htmlBody } = req.body as { name?: string; subject?: string; htmlBody?: string }
+    if (!name?.trim() || !subject?.trim() || !htmlBody?.trim())
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'name, subject, and htmlBody are required' })
+    type TIRow = { id: string; updated_at: string }
+    const rows = (await adminDb`
+      INSERT INTO email_templates (client_id, name, subject, html_body)
+      VALUES (${auth.clientId}, ${name.trim()}, ${subject.trim()}, ${htmlBody.trim()})
+      RETURNING id, updated_at
+    `) as unknown as TIRow[]
+    const r = rows[0]!
+    return reply.status(201).send({ id: r.id, name: name.trim(), subject: subject.trim(), htmlBody: htmlBody.trim(), updatedAt: r.updated_at })
+  })
+
+  app.put('/email/templates/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    const { name, subject, htmlBody } = req.body as { name?: string; subject?: string; htmlBody?: string }
+    await adminDb`
+      UPDATE email_templates SET
+        name       = COALESCE(${name      ?? null}, name),
+        subject    = COALESCE(${subject   ?? null}, subject),
+        html_body  = COALESCE(${htmlBody  ?? null}, html_body),
+        updated_at = NOW()
+      WHERE id = ${id} AND client_id = ${auth.clientId}
+    `
+    return reply.status(204).send()
+  })
+
+  app.delete('/email/templates/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    await adminDb`DELETE FROM email_templates WHERE id = ${id} AND client_id = ${auth.clientId}`
+    return reply.status(204).send()
+  })
+
+  // ── Email: Contact Lists ───────────────────────────────────────
+
+  app.get('/email/contacts/lists', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type LRow = { id: string; name: string; created_at: string; contact_count: string }
+    const rows = (await adminDb`
+      SELECT l.id, l.name, l.created_at, COUNT(ec.id)::text AS contact_count
+      FROM   email_contact_lists l
+      LEFT JOIN email_contacts ec ON ec.list_id = l.id
+      WHERE  l.client_id = ${auth.clientId}
+      GROUP BY l.id ORDER BY l.created_at DESC
+    `) as unknown as LRow[]
+    return reply.send(rows.map(r => ({ id: r.id, name: r.name, contactCount: parseInt(r.contact_count, 10), createdAt: r.created_at })))
+  })
+
+  app.post('/email/contacts/lists', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { name } = req.body as { name?: string }
+    if (!name?.trim()) return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'name is required' })
+    type LIRow = { id: string; created_at: string }
+    const rows = (await adminDb`
+      INSERT INTO email_contact_lists (client_id, name) VALUES (${auth.clientId}, ${name.trim()})
+      RETURNING id, created_at
+    `) as unknown as LIRow[]
+    const r = rows[0]!
+    return reply.status(201).send({ id: r.id, name: name.trim(), contactCount: 0, createdAt: r.created_at })
+  })
+
+  app.delete('/email/contacts/lists/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    await adminDb`DELETE FROM email_contact_lists WHERE id = ${id} AND client_id = ${auth.clientId}`
+    return reply.status(204).send()
+  })
+
+  app.get('/email/contacts/lists/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    type CRow = { id: string; email: string; first_name: string | null; last_name: string | null; created_at: string }
+    const rows = (await adminDb`
+      SELECT id, email, first_name, last_name, created_at
+      FROM   email_contacts WHERE list_id = ${id} AND client_id = ${auth.clientId}
+      ORDER BY created_at DESC LIMIT 500
+    `) as unknown as CRow[]
+    return reply.send(rows.map(r => ({ id: r.id, email: r.email, firstName: r.first_name, lastName: r.last_name, createdAt: r.created_at })))
+  })
+
+  app.post('/email/contacts/lists/:id/import', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    const list = (await adminDb`SELECT id FROM email_contact_lists WHERE id = ${id} AND client_id = ${auth.clientId}`) as unknown as { id: string }[]
+    if (!list[0]) return reply.status(404).send({ error: 'NOT_FOUND', message: 'List not found' })
+    const contacts = req.body as { email: string; firstName?: string; lastName?: string }[]
+    if (!Array.isArray(contacts) || contacts.length === 0)
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'Provide array of contacts' })
+    let imported = 0
+    for (const c of contacts) {
+      if (!c.email?.includes('@')) continue
+      await adminDb`
+        INSERT INTO email_contacts (list_id, client_id, email, first_name, last_name)
+        VALUES (${id}, ${auth.clientId}, ${c.email.toLowerCase()}, ${c.firstName ?? null}, ${c.lastName ?? null})
+        ON CONFLICT (list_id, email) DO NOTHING
+      `
+      imported++
+    }
+    return reply.send({ imported })
+  })
+
+  app.delete('/email/contacts/:contactId', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { contactId } = req.params as { contactId: string }
+    await adminDb`DELETE FROM email_contacts WHERE id = ${contactId} AND client_id = ${auth.clientId}`
+    return reply.status(204).send()
+  })
+
+  // ── Email: Campaigns ───────────────────────────────────────────
+
+  app.get('/email/campaigns', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type CampRow = {
+      id: string; name: string; status: string
+      template_name: string; list_name: string
+      total_recipients: number; total_sent: number; total_delivered: number
+      total_clicked: number; total_bounced: number
+      scheduled_at: string | null; started_at: string | null; completed_at: string | null
+      created_at: string
+    }
+    const rows = (await adminDb`
+      SELECT camp.id, camp.name, camp.status, camp.scheduled_at, camp.started_at, camp.completed_at,
+             camp.total_recipients, camp.total_sent, camp.total_delivered, camp.total_clicked, camp.total_bounced,
+             camp.created_at,
+             t.name AS template_name, l.name AS list_name
+      FROM   email_campaigns camp
+      JOIN   email_templates       t ON t.id = camp.template_id
+      JOIN   email_contact_lists   l ON l.id = camp.list_id
+      WHERE  camp.client_id = ${auth.clientId}
+      ORDER BY camp.created_at DESC LIMIT 100
+    `) as unknown as CampRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, name: r.name, status: r.status,
+      templateName: r.template_name, listName: r.list_name,
+      totalRecipients: Number(r.total_recipients), totalSent: Number(r.total_sent),
+      totalDelivered: Number(r.total_delivered), totalClicked: Number(r.total_clicked),
+      totalBounced: Number(r.total_bounced),
+      deliveryRate: r.total_sent ? Math.round((Number(r.total_delivered) / Number(r.total_sent)) * 10000) / 100 : 0,
+      scheduledAt: r.scheduled_at, startedAt: r.started_at, completedAt: r.completed_at,
+      createdAt: r.created_at,
+    })))
+  })
+
+  app.post('/email/campaigns', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { name, templateId, listId, domainId, fromName, fromEmail, scheduledAt } = req.body as {
+      name?: string; templateId?: string; listId?: string; domainId?: string
+      fromName?: string; fromEmail?: string; scheduledAt?: string
+    }
+    if (!name?.trim() || !templateId || !listId || !domainId || !fromName?.trim() || !fromEmail?.trim())
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'name, templateId, listId, domainId, fromName, fromEmail are required' })
+    const tmpl = (await adminDb`SELECT id FROM email_templates WHERE id = ${templateId} AND client_id = ${auth.clientId}`) as unknown as { id: string }[]
+    if (!tmpl[0]) return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'Template not found' })
+    const lst = (await adminDb`SELECT id FROM email_contact_lists WHERE id = ${listId} AND client_id = ${auth.clientId}`) as unknown as { id: string }[]
+    if (!lst[0]) return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'Contact list not found' })
+    const dom = (await adminDb`SELECT id FROM email_domains WHERE id = ${domainId} AND client_id = ${auth.clientId}`) as unknown as { id: string }[]
+    if (!dom[0]) return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'Domain not found' })
+    type CIRow = { id: string; created_at: string }
+    const rows = (await adminDb`
+      INSERT INTO email_campaigns (client_id, name, template_id, list_id, domain_id, from_name, from_email, status, scheduled_at)
+      VALUES (${auth.clientId}, ${name.trim()}, ${templateId}, ${listId}, ${domainId}, ${fromName.trim()}, ${fromEmail.trim()},
+              ${scheduledAt ? 'scheduled' : 'draft'}, ${scheduledAt ?? null})
+      RETURNING id, created_at
+    `) as unknown as CIRow[]
+    const r = rows[0]!
+    return reply.status(201).send({ id: r.id, name: name.trim(), status: scheduledAt ? 'scheduled' : 'draft', createdAt: r.created_at })
+  })
+
+  app.get('/email/campaigns/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    type CampRow2 = {
+      id: string; name: string; status: string; from_name: string; from_email: string
+      template_name: string; template_id: string; list_name: string; list_id: string
+      total_recipients: number; total_sent: number; total_delivered: number
+      total_clicked: number; total_bounced: number
+      scheduled_at: string | null; started_at: string | null; completed_at: string | null
+      created_at: string
+    }
+    const rows = (await adminDb`
+      SELECT camp.*, t.name AS template_name, l.name AS list_name
+      FROM   email_campaigns camp
+      JOIN   email_templates       t ON t.id = camp.template_id
+      JOIN   email_contact_lists   l ON l.id = camp.list_id
+      WHERE  camp.id = ${id} AND camp.client_id = ${auth.clientId}
+    `) as unknown as CampRow2[]
+    if (!rows[0]) return reply.status(404).send({ error: 'NOT_FOUND', message: 'Campaign not found' })
+    const r = rows[0]!
+    return reply.send({
+      id: r.id, name: r.name, status: r.status,
+      fromName: r.from_name, fromEmail: r.from_email,
+      templateId: r.template_id, templateName: r.template_name,
+      listId: r.list_id, listName: r.list_name,
+      totalRecipients: Number(r.total_recipients), totalSent: Number(r.total_sent),
+      totalDelivered: Number(r.total_delivered), totalClicked: Number(r.total_clicked),
+      totalBounced: Number(r.total_bounced),
+      scheduledAt: r.scheduled_at, startedAt: r.started_at, completedAt: r.completed_at,
+      createdAt: r.created_at,
+    })
+  })
+
+  app.post('/email/campaigns/:id/send', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    const camp = (await adminDb`SELECT status FROM email_campaigns WHERE id = ${id} AND client_id = ${auth.clientId}`) as unknown as { status: string }[]
+    if (!camp[0]) return reply.status(404).send({ error: 'NOT_FOUND', message: 'Campaign not found' })
+    if (camp[0].status === 'sending' || camp[0].status === 'sent')
+      return reply.status(409).send({ error: 'CONFLICT', message: `Campaign is already ${camp[0].status}` })
+    const { launchCampaign } = await import('../../services/email-campaigns.js')
+    const { queued } = await launchCampaign(id)
+    return reply.send({ launched: true, queued })
+  })
+
+  app.post('/email/campaigns/:id/cancel', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    await adminDb`
+      UPDATE email_campaigns SET status = 'cancelled', updated_at = NOW()
+      WHERE id = ${id} AND client_id = ${auth.clientId} AND status IN ('draft', 'scheduled')
+    `
+    return reply.send({ cancelled: true })
+  })
+
+  app.delete('/email/campaigns/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    await adminDb`
+      DELETE FROM email_campaigns WHERE id = ${id} AND client_id = ${auth.clientId} AND status IN ('draft', 'scheduled', 'cancelled')
+    `
+    return reply.status(204).send()
   })
 
   // ── Usage ──────────────────────────────────────────────────────

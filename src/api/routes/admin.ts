@@ -608,7 +608,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     const client    = clients[0]!
     const portalUrl = config.isProduction
-      ? 'https://era-hub.up.railway.app'
+      ? 'https://hub.erasystems.com.ng'
       : 'http://localhost:5173'
 
     // Send email if contact email is on file and Resend is configured
