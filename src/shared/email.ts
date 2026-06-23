@@ -1,7 +1,24 @@
+import nodemailer from 'nodemailer'
 import { config } from './config.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ component: 'email' })
+
+let transport: nodemailer.Transporter | null = null
+
+function getTransport(): nodemailer.Transporter | null {
+  const { smtpHost, smtpPort, smtpUser, smtpPass } = config.email
+  if (!smtpHost || !smtpUser || !smtpPass) return null
+  if (!transport) {
+    transport = nodemailer.createTransport({
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpPort === 465,
+      auth: { user: smtpUser, pass: smtpPass },
+    })
+  }
+  return transport
+}
 
 export interface EmailOptions {
   to: string
@@ -11,39 +28,24 @@ export interface EmailOptions {
 }
 
 export async function sendEmail(opts: EmailOptions): Promise<boolean> {
-  const { postalServerUrl, postalApiKey, from } = config.email
-
-  if (!postalServerUrl || !postalApiKey) {
-    log.warn({ to: opts.to, subject: opts.subject }, 'Email skipped — Postal not configured (set POSTAL_SERVER_URL and POSTAL_API_KEY)')
+  const t = getTransport()
+  if (!t) {
+    log.warn({ to: opts.to, subject: opts.subject }, 'Email skipped — SMTP not configured (set SMTP_HOST, SMTP_USER, SMTP_PASS)')
     return false
   }
 
   try {
-    const res = await fetch(`${postalServerUrl}/api/v1/send/message`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Server-API-Key': postalApiKey,
-      },
-      body: JSON.stringify({
-        to:         [opts.to],
-        from:       from,
-        subject:    opts.subject,
-        html_body:  opts.html,
-        plain_body: opts.text ?? '',
-      }),
+    await t.sendMail({
+      from: `ERA Systems <${config.email.from}>`,
+      to:   opts.to,
+      subject: opts.subject,
+      html: opts.html,
+      text: opts.text,
     })
-
-    if (!res.ok) {
-      const body = await res.text()
-      log.error({ status: res.status, body, to: opts.to }, 'Postal delivery failed')
-      return false
-    }
-
-    log.info({ to: opts.to, subject: opts.subject }, 'Email sent via Postal')
+    log.info({ to: opts.to, subject: opts.subject }, 'Email sent')
     return true
   } catch (err) {
-    log.error({ err, to: opts.to }, 'Postal send threw')
+    log.error({ err, to: opts.to }, 'Email send failed')
     return false
   }
 }

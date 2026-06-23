@@ -30,8 +30,13 @@ read -rp "Anthropic API key (sk-ant-...): " ANTHROPIC_KEY
 read -rp "Your WhatsApp number for alerts (e.g. +2348012345678): " WA_NUMBER
 [ -z "$WA_NUMBER" ] && required "WhatsApp number is required"
 
-read -rp "Email from address (e.g. noreply@$DOMAIN): " EMAIL_FROM
-EMAIL_FROM=${EMAIL_FROM:-"noreply@$DOMAIN"}
+echo ""
+echo "Email setup — use your Gmail address to send system emails."
+echo "(For Gmail you need an App Password — go to myaccount.google.com > Security > App passwords)"
+echo ""
+read -rp "Your Gmail address (e.g. you@gmail.com): " SMTP_USER
+read -rp "Gmail App Password (16 characters, no spaces): " SMTP_PASS
+EMAIL_FROM=${SMTP_USER}
 
 echo ""
 info "Got it. Setting everything up now — this takes about 5 minutes..."
@@ -90,11 +95,12 @@ ALERT_WHATSAPP_NUMBER=${WA_NUMBER}
 OPERATOR_INTERNAL_CLIENT_ID=c0ffee00-0000-4000-a000-000000000001
 
 EMAIL_FROM=${EMAIL_FROM}
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=${SMTP_USER}
+SMTP_PASS=${SMTP_PASS}
 
 PORTAL_URL=https://hub.${DOMAIN}
-POSTAL_SERVER_URL=https://postal.${DOMAIN}
-POSTAL_API_KEY=
-POSTAL_RATE_LIMIT=50
 
 WHATSAPP_PROXY_URL=
 ENV
@@ -119,7 +125,7 @@ mkdir -p /var/www/era-hub
 cat > /etc/nginx/sites-available/era-comms <<NGINX
 server {
     listen 80;
-    server_name api.${DOMAIN} hub.${DOMAIN} postal.${DOMAIN};
+    server_name api.${DOMAIN} hub.${DOMAIN};
 
     # Temporary HTTP config — certbot will upgrade to HTTPS
     location / { return 200 'ERA Comms installing...'; add_header Content-Type text/plain; }
@@ -133,15 +139,16 @@ nginx -t && systemctl reload nginx
 # ── 9. OBTAIN SSL CERTIFICATES ────────────────────────────────
 info "Obtaining SSL certificates (make sure DNS is pointed to this server first)..."
 echo ""
-warn "DNS check: api.${DOMAIN}, hub.${DOMAIN}, and postal.${DOMAIN}"
-warn "must all point to this server's IP before continuing."
+warn "You need TWO DNS A records pointing to this server's IP:"
+warn "  api.${DOMAIN}  →  this server's IP"
+warn "  hub.${DOMAIN}  →  this server's IP"
 echo ""
 read -rp "Have you set the DNS records? (yes/no): " DNS_READY
 
 if [ "$DNS_READY" = "yes" ]; then
-    certbot --nginx --non-interactive --agree-tos -m "admin@${DOMAIN}" \
-        -d "api.${DOMAIN}" -d "hub.${DOMAIN}" -d "postal.${DOMAIN}" || \
-        warn "SSL setup failed — run: certbot --nginx -d api.${DOMAIN} -d hub.${DOMAIN} -d postal.${DOMAIN}"
+    certbot --nginx --non-interactive --agree-tos -m "${SMTP_USER}" \
+        -d "api.${DOMAIN}" -d "hub.${DOMAIN}" || \
+        warn "SSL setup failed — run: certbot --nginx -d api.${DOMAIN} -d hub.${DOMAIN}"
 
     # Write the real nginx config with SSL + proxy
     cat > /etc/nginx/sites-available/era-comms <<NGINX2
@@ -174,21 +181,8 @@ server {
     location /assets/ { expires 1y; add_header Cache-Control "public, immutable"; }
 }
 server {
-    listen 443 ssl;
-    server_name postal.${DOMAIN};
-    ssl_certificate /etc/letsencrypt/live/api.${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.${DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    location / {
-        proxy_pass http://127.0.0.1:5000;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-Proto https;
-    }
-}
-server {
     listen 80;
-    server_name api.${DOMAIN} hub.${DOMAIN} postal.${DOMAIN};
+    server_name api.${DOMAIN} hub.${DOMAIN};
     return 301 https://\$host\$request_uri;
 }
 NGINX2
@@ -196,7 +190,7 @@ NGINX2
     info "nginx configured with SSL"
 else
     warn "Skipping SSL for now. Run this later:"
-    warn "  certbot --nginx -d api.${DOMAIN} -d hub.${DOMAIN} -d postal.${DOMAIN}"
+    warn "  certbot --nginx -d api.${DOMAIN} -d hub.${DOMAIN}"
 fi
 
 # ── 10. DONE ──────────────────────────────────────────────────
