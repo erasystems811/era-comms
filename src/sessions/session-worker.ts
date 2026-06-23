@@ -127,13 +127,37 @@ async function start(): Promise<void> {
 
   // Publish QR codes to Redis so the API WebSocket can forward them.
   // The generator yields until the session connects or fails — then closes.
+  // If WhatsApp never responds (e.g. datacenter IP silently dropped),
+  // emit a timeout error after 45 s so the frontend shows a real reason.
   void (async () => {
+    let gotEvent = false
+
+    const idleTimeout = setTimeout(async () => {
+      if (!gotEvent) {
+        workerLogger.warn('No QR from WhatsApp after 45 s — connection may be blocked')
+        await generalRedis.publish(
+          CHANNEL.sessionQR(SESSION_ID),
+          JSON.stringify({
+            type: 'error',
+            reason:
+              'WhatsApp is not responding (45 s timeout). The server IP may be blocked by WhatsApp. Try again — if it keeps failing, the session may need to run outside Railway.',
+          }),
+        )
+      }
+    }, 45_000)
+
     try {
       for await (const event of session.qrStream()) {
+        if (!gotEvent) {
+          gotEvent = true
+          clearTimeout(idleTimeout)
+        }
         await generalRedis.publish(CHANNEL.sessionQR(SESSION_ID), JSON.stringify(event))
       }
     } catch {
       // Generator closed — session connected or terminated
+    } finally {
+      clearTimeout(idleTimeout)
     }
   })()
 
