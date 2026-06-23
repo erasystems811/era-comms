@@ -1,0 +1,77 @@
+services:
+
+  # ── POSTAL DATABASE ────────────────────────────────────────────
+  postal-mariadb:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: ${POSTAL_DB_ROOT_PASSWORD}
+      MARIADB_DATABASE: postal
+      MARIADB_USER: postal
+      MARIADB_PASSWORD: ${POSTAL_DB_PASSWORD}
+    volumes:
+      - postal_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── POSTAL MESSAGE BUS ─────────────────────────────────────────
+  postal-rabbitmq:
+    image: rabbitmq:3-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: postal
+      RABBITMQ_DEFAULT_PASS: ${POSTAL_RABBITMQ_PASSWORD}
+    volumes:
+      - postal_rabbitmq:/var/lib/rabbitmq
+
+  # ── POSTAL SERVICES ────────────────────────────────────────────
+  postal-web:
+    image: ghcr.io/postalserver/postal:latest
+    restart: unless-stopped
+    command: postal web-server
+    ports:
+      - "127.0.0.1:5000:5000"
+    env_file:
+      - postal.env
+    depends_on:
+      postal-mariadb:
+        condition: service_healthy
+      postal-rabbitmq:
+        condition: service_started
+
+  postal-worker:
+    image: ghcr.io/postalserver/postal:latest
+    restart: unless-stopped
+    command: postal worker
+    env_file:
+      - postal.env
+    depends_on:
+      - postal-web
+
+  postal-smtp:
+    image: ghcr.io/postalserver/postal:latest
+    restart: unless-stopped
+    command: postal smtp-server
+    ports:
+      - "25:25"
+      - "587:587"
+    env_file:
+      - postal.env
+    depends_on:
+      - postal-web
+
+  postal-cron:
+    image: ghcr.io/postalserver/postal:latest
+    restart: unless-stopped
+    command: postal cron
+    env_file:
+      - postal.env
+    depends_on:
+      - postal-web
+
+volumes:
+  postal_db:
+  postal_rabbitmq:

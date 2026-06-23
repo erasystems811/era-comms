@@ -1,0 +1,58 @@
+services:
+
+  # ── DATABASE ───────────────────────────────────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: era_comms
+      POSTGRES_USER: era_app
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U era_app -d era_comms"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ── REDIS ──────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── ERA COMMS API ──────────────────────────────────────────────
+  era-comms:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    # Bind to localhost only — nginx proxies from outside
+    ports:
+      - "127.0.0.1:3000:3000"
+    env_file:
+      - ../.env.production
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://era_app:${POSTGRES_PASSWORD}@postgres:5432/era_comms
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - wa_creds:/app/wa-creds
+
+volumes:
+  postgres_data:
+  redis_data:
+  wa_creds:
