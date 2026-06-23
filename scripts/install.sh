@@ -1,7 +1,7 @@
 #!/bin/bash
 # ERA Comms — one-command VPS installer
 # Run as root on a fresh Ubuntu 22.04/24.04 VPS:
-#   curl -fsSL https://raw.githubusercontent.com/erasystems811/era-comms/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/erasystems811/era-comms/main/scripts/install.sh -o install.sh && bash install.sh
 
 set -e
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
