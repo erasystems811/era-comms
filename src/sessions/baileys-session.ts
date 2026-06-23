@@ -80,7 +80,7 @@ export class BaileysSession implements IWhatsAppSession {
     const proxyUrl = process.env.WHATSAPP_PROXY_URL
     if (proxyUrl) {
       const { SocksProxyAgent } = await import('socks-proxy-agent')
-      agent = new SocksProxyAgent(proxyUrl)
+      agent = new SocksProxyAgent(proxyUrl) as unknown as import('https').Agent
     }
 
     this.socket = makeWASocket({
