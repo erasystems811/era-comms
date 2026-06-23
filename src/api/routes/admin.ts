@@ -752,7 +752,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
   app.post('/sessions/otp/send', async (req, reply) => {
     if (!assertOperator(req, reply)) return
 
-    const body = req.body as { phoneNumber?: string }
+    const body = req.body as { phoneNumber?: string; email?: string }
     if (!body.phoneNumber) {
       return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'phoneNumber is required' })
     }
@@ -764,7 +764,37 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     const otpId = rows[0]!.id
 
-    // Deliver via WhatsApp using the operator's master session
+    // Try email delivery first (most reliable)
+    if (body.email) {
+      sendEmail({
+        to:      body.email,
+        subject: `ERA Comms — Your verification code: ${code}`,
+        html: `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0;padding:0;background:#0f0d17;font-family:system-ui,sans-serif;color:#e2e0ef">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:480px;margin:40px auto">
+    <tr><td style="padding:32px">
+      <div style="margin-bottom:24px">
+        <span style="font-size:20px;font-weight:700;color:#bf7c93">ERA</span>
+        <span style="font-size:20px;font-weight:700;color:#e2e0ef"> Comms</span>
+      </div>
+      <h1 style="font-size:18px;font-weight:700;color:#e2e0ef;margin:0 0 8px">Your verification code</h1>
+      <p style="color:#8b8a9b;margin:0 0 24px;font-size:14px">Use this code to verify WhatsApp number <strong style="color:#e2e0ef">${body.phoneNumber}</strong></p>
+      <div style="background:#1a1729;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:24px;text-align:center;margin-bottom:24px">
+        <p style="font-size:40px;font-weight:700;letter-spacing:0.3em;color:#bf7c93;margin:0;font-family:monospace">${code}</p>
+      </div>
+      <p style="font-size:12px;color:#4a4958">Expires in 10 minutes. Do not share this code with anyone.</p>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+        text: `Your ERA Comms verification code is: ${code}\n\nThis code expires in 10 minutes.`,
+      }).catch(err => req.log.error({ err }, 'OTP email delivery failed'))
+    }
+
+    // Also try WhatsApp if an internal session is connected
     const internalClientId = config.monitoring.operatorInternalClientId
     if (internalClientId) {
       const sessions = (await adminDb`
@@ -778,14 +808,14 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
           clientId:   internalClientId,
           sessionId:  sessions[0].id,
           to:         body.phoneNumber,
-          content:    `Your ERA Comms verification code is: *${code}*\n\nExpires in 10 minutes. Do not share it with anyone.`,
+          content:    `Your ERA Comms verification code is: *${code}*\n\nExpires in 10 minutes.`,
           aiGenerated: false,
         }).catch(err => req.log.error({ err }, 'OTP WhatsApp delivery failed'))
-      } else {
-        req.log.warn({ phoneNumber: body.phoneNumber, code }, 'OTP generated but no connected master session — code logged for manual delivery')
       }
-    } else {
-      req.log.warn({ phoneNumber: body.phoneNumber, code }, 'OTP generated — OPERATOR_INTERNAL_CLIENT_ID not set, code logged for manual delivery')
+    }
+
+    if (!body.email) {
+      req.log.warn({ phoneNumber: body.phoneNumber, code }, 'OTP generated — no email provided and no WhatsApp session, code logged only')
     }
 
     return reply.status(201).send({ otpId })
