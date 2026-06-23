@@ -268,6 +268,50 @@ export const connectAdminRoutes: FastifyPluginAsync = async (app) => {
     return { events: rows.map(mapEvent), total: parseInt(total, 10), limit, offset }
   })
 
+  // GET /release
+  app.get('/release', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const [row] = await adminDb<[{ version: string; download_url: string; updated_at: string }]>`
+      SELECT version, download_url, updated_at FROM connect_release WHERE id = 1
+    `
+    if (!row) return { version: '0.0.0', downloadUrl: '', updatedAt: null }
+    return { version: row.version, downloadUrl: row.download_url, updatedAt: row.updated_at }
+  })
+
+  // PATCH /release
+  app.patch('/release', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const body = req.body as { version?: string; downloadUrl?: string }
+    if (!body?.version?.trim() || !body?.downloadUrl?.trim()) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'version and downloadUrl are required' })
+    }
+    const [row] = await adminDb<[{ version: string; download_url: string; updated_at: string }]>`
+      UPDATE connect_release
+      SET version = ${body.version.trim()}, download_url = ${body.downloadUrl.trim()}, updated_at = NOW()
+      WHERE id = 1
+      RETURNING version, download_url, updated_at
+    `
+    return { version: row!.version, downloadUrl: row!.download_url, updatedAt: row!.updated_at }
+  })
+
+  // POST /instances/:id/restart
+  app.post('/instances/:id/restart', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id } = req.params as { id: string }
+    const result = await adminDb`
+      UPDATE connect_configs SET pending_restart = TRUE, updated_at = NOW()
+      WHERE instance_id = ${id}
+    `
+    if (result.count === 0) {
+      return reply.status(404).send({ error: 'NOT_FOUND', message: 'Instance not found' })
+    }
+    await adminDb`
+      INSERT INTO connect_events (instance_id, event_type, message)
+      VALUES (${id}, 'restart', 'Remote restart triggered from era-hub')
+    `
+    return reply.status(204).send()
+  })
+
   // GET /stats
   app.get('/stats', async (req, reply) => {
     if (!assertOperator(req, reply)) return
@@ -362,6 +406,17 @@ export const connectAgentRoutes: FastifyPluginAsync = async (app) => {
     return instance
   }
 
+  // GET /version — no auth, exe calls this before it has an instance
+  app.get('/version', async (_req, reply) => {
+    const [row] = await adminDb<[{ version: string; download_url: string }]>`
+      SELECT version, download_url FROM connect_release WHERE id = 1
+    `
+    if (!row || !row.download_url) {
+      return reply.status(204).send()
+    }
+    return { version: row.version, downloadUrl: row.download_url }
+  })
+
   // POST /telemetry
   app.post('/telemetry', async (req, reply) => {
     const instance = await resolveOrCreateInstance(req, reply)
@@ -436,10 +491,6 @@ export const connectAgentRoutes: FastifyPluginAsync = async (app) => {
     if (!instance) return
 
     await adminDb`
-      INSERT INTO connect_events (instance_id, event_type, message)
-      VALUES (${instance.id}, 'config_fetched', 'Agent fetched remote config')
-    `
-    await adminDb`
       UPDATE connect_instances
       SET last_heartbeat_at = NOW(), status = 'online', updated_at = NOW()
       WHERE id = ${instance.id}
@@ -449,8 +500,19 @@ export const connectAgentRoutes: FastifyPluginAsync = async (app) => {
       SELECT * FROM connect_configs WHERE instance_id = ${instance.id}
     `
 
-    if (!cfg) return { syncIntervalSeconds: 30, paused: false, notifyEmail: null }
+    if (!cfg) return { syncIntervalSeconds: 30, paused: false, pendingRestart: false, notifyEmail: null }
 
-    return mapConfig(cfg)
+    // If a restart is pending, return it once and immediately clear it so the
+    // exe doesn't restart on every subsequent config poll.
+    if ((cfg as ConfigRow & { pending_restart?: boolean }).pending_restart) {
+      await adminDb`
+        UPDATE connect_configs SET pending_restart = FALSE WHERE instance_id = ${instance.id}
+      `
+    }
+
+    return {
+      ...mapConfig(cfg),
+      pendingRestart: !!(cfg as ConfigRow & { pending_restart?: boolean }).pending_restart,
+    }
   })
 }
