@@ -36,11 +36,16 @@ const schema = z.object({
 
   EMAIL_FROM: z.string().email().optional().default('noreply@erasystems.com.ng'),
 
-  // SMTP — works with Gmail, your domain email, or any mail provider
+  // SMTP — for system emails (OTP codes, welcome emails). Use Gmail or any email account.
   SMTP_HOST: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
   SMTP_PORT: z.coerce.number().int().default(587),
   SMTP_USER: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
   SMTP_PASS: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+
+  // Postal — self-hosted email server on your VPS (powers the business email campaign feature)
+  POSTAL_SERVER_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
+  POSTAL_API_KEY:    z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+  POSTAL_RATE_LIMIT: z.coerce.number().int().default(50),
 
   // Voice infrastructure
   SIP_TRUNK_HOST: z.string().optional(),
@@ -103,11 +108,14 @@ export const config = Object.freeze({
   connectSharedSecret: env.CONNECT_SHARED_SECRET,
 
   email: {
-    from:     env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
-    smtpHost: env.SMTP_HOST,
-    smtpPort: env.SMTP_PORT,
-    smtpUser: env.SMTP_USER,
-    smtpPass: env.SMTP_PASS,
+    from:            env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
+    smtpHost:        env.SMTP_HOST,
+    smtpPort:        env.SMTP_PORT,
+    smtpUser:        env.SMTP_USER,
+    smtpPass:        env.SMTP_PASS,
+    postalServerUrl: env.POSTAL_SERVER_URL,
+    postalApiKey:    env.POSTAL_API_KEY,
+    postalRateLimit: env.POSTAL_RATE_LIMIT,
   },
 
   monitoring: {
