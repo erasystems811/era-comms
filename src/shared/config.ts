@@ -34,7 +34,7 @@ const schema = z.object({
   // The ERA Systems internal client — pre-seeded by migration 004
   OPERATOR_INTERNAL_CLIENT_ID: z.string().uuid().default('c0ffee00-0000-4000-a000-000000000001'),
 
-  EMAIL_FROM: z.string().email().optional().default('noreply@erasystems.com.ng'),
+  EMAIL_FROM: z.preprocess(v => (typeof v === 'string' ? v.trim() : v), z.string().optional().default('noreply@erasystems.com.ng')),
 
   // SMTP — for system emails (OTP codes, welcome emails). Use Gmail or any email account.
   SMTP_HOST: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
