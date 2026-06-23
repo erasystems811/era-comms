@@ -195,9 +195,9 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
     `
 
     // Email the business owner their portal access details
-    const portalUrl = config.isProduction
+    const portalUrl = process.env.PORTAL_URL ?? (config.isProduction
       ? 'https://era-hub.up.railway.app'
-      : 'http://localhost:5173'
+      : 'http://localhost:5173')
 
     sendEmail(portalAccessEmail({
       businessName: request.business_name,
