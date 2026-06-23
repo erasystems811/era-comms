@@ -1,16 +1,7 @@
-import { Resend } from 'resend'
 import { config } from './config.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ component: 'email' })
-
-let resend: Resend | null = null
-
-function getResend(): Resend | null {
-  if (!config.email.resendApiKey) return null
-  if (!resend) resend = new Resend(config.email.resendApiKey)
-  return resend
-}
 
 export interface EmailOptions {
   to: string
@@ -20,28 +11,39 @@ export interface EmailOptions {
 }
 
 export async function sendEmail(opts: EmailOptions): Promise<boolean> {
-  const client = getResend()
-  if (!client) {
-    log.warn({ to: opts.to, subject: opts.subject }, 'Email skipped — RESEND_API_KEY not configured')
+  const { postalServerUrl, postalApiKey, from } = config.email
+
+  if (!postalServerUrl || !postalApiKey) {
+    log.warn({ to: opts.to, subject: opts.subject }, 'Email skipped — Postal not configured (set POSTAL_SERVER_URL and POSTAL_API_KEY)')
     return false
   }
 
   try {
-    const { error } = await client.emails.send({
-      from: `ERA Systems <${config.email.from}>`,
-      to:   opts.to,
-      subject: opts.subject,
-      html: opts.html,
-      text: opts.text,
+    const res = await fetch(`${postalServerUrl}/api/v1/send/message`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Server-API-Key': postalApiKey,
+      },
+      body: JSON.stringify({
+        to:         [opts.to],
+        from:       from,
+        subject:    opts.subject,
+        html_body:  opts.html,
+        plain_body: opts.text ?? '',
+      }),
     })
-    if (error) {
-      log.error({ error, to: opts.to }, 'Resend delivery failed')
+
+    if (!res.ok) {
+      const body = await res.text()
+      log.error({ status: res.status, body, to: opts.to }, 'Postal delivery failed')
       return false
     }
-    log.info({ to: opts.to, subject: opts.subject }, 'Email sent')
+
+    log.info({ to: opts.to, subject: opts.subject }, 'Email sent via Postal')
     return true
   } catch (err) {
-    log.error({ err, to: opts.to }, 'Email send threw')
+    log.error({ err, to: opts.to }, 'Postal send threw')
     return false
   }
 }

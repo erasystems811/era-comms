@@ -34,8 +34,6 @@ const schema = z.object({
   // The ERA Systems internal client — pre-seeded by migration 004
   OPERATOR_INTERNAL_CLIENT_ID: z.string().uuid().default('c0ffee00-0000-4000-a000-000000000001'),
 
-  // Email delivery via Resend (optional — used for transactional system emails)
-  RESEND_API_KEY: z.string().optional(),
   EMAIL_FROM: z.string().email().optional().default('noreply@erasystems.com.ng'),
 
   // Postal self-hosted mail server (optional — bulk/campaign email module)
@@ -105,7 +103,6 @@ export const config = Object.freeze({
   connectSharedSecret: env.CONNECT_SHARED_SECRET,
 
   email: {
-    resendApiKey:    env.RESEND_API_KEY,
     from:            env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
     postalServerUrl: env.POSTAL_SERVER_URL,
     postalApiKey:    env.POSTAL_API_KEY,

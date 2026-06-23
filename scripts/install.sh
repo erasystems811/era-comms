@@ -33,8 +33,6 @@ read -rp "Your WhatsApp number for alerts (e.g. +2348012345678): " WA_NUMBER
 read -rp "Email from address (e.g. noreply@$DOMAIN): " EMAIL_FROM
 EMAIL_FROM=${EMAIL_FROM:-"noreply@$DOMAIN"}
 
-read -rp "Resend API key (re_... — press Enter to skip): " RESEND_KEY
-
 echo ""
 info "Got it. Setting everything up now — this takes about 5 minutes..."
 echo ""
@@ -91,7 +89,6 @@ CONNECT_SHARED_SECRET=era-connect-telemetry-v1
 ALERT_WHATSAPP_NUMBER=${WA_NUMBER}
 OPERATOR_INTERNAL_CLIENT_ID=c0ffee00-0000-4000-a000-000000000001
 
-RESEND_API_KEY=${RESEND_KEY}
 EMAIL_FROM=${EMAIL_FROM}
 
 PORTAL_URL=https://hub.${DOMAIN}
