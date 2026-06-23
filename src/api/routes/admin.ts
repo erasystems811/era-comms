@@ -483,7 +483,6 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
   })
 
   // ── DELETE /v1/admin/clients/:id ────────────────────────────
-  // Soft-delete: marks as suspended to preserve audit trail and session history.
 
   app.delete('/clients/:id', async (req, reply) => {
     if (!assertOperator(req, reply)) return
@@ -492,11 +491,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const rows = (await adminDb`SELECT id FROM clients WHERE id = ${id}`) as unknown as Array<{ id: string }>
     if (!rows[0]) throw new NotFoundError('Client')
 
-    await adminDb`UPDATE clients SET status = 'suspended', updated_at = NOW() WHERE id = ${id}`
-    await adminDb`
-      INSERT INTO audit_log (actor, actor_label, action, target, target_id, detail)
-      VALUES ('operator', 'ERA Systems', 'deleted_client', 'client', ${id}, 'Client deleted via operator panel')
-    `
+    await adminDb`DELETE FROM clients WHERE id = ${id}`
     return reply.status(204).send()
   })
 
@@ -1065,6 +1060,65 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       WHERE id = ${id} AND resolved_at IS NULL RETURNING id
     `) as unknown as Array<{ id: string }>
     if (!rows[0]) throw new NotFoundError('Alert')
+    return reply.status(204).send()
+  })
+
+  // ── GET /v1/admin/ai-config ─────────────────────────────────
+
+  app.get('/ai-config', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    type SettingsRow = {
+      ai_temperature: string; ai_system_prompt: string
+      ai_max_requests_per_hour: number; ai_max_tokens_per_response: number
+      ai_daily_spend_cutoff: string
+    }
+
+    const rows = (await adminDb`SELECT * FROM operator_settings WHERE id = 'global'`) as unknown as SettingsRow[]
+    const row  = rows[0]
+    if (!row) {
+      return {
+        temperature: 0.7, systemPrompt: '', maxRequestsPerHour: 100,
+        maxTokensPerResponse: 1000, dailySpendCutoff: 5000,
+      }
+    }
+    return {
+      temperature:          parseFloat(row.ai_temperature),
+      systemPrompt:         row.ai_system_prompt,
+      maxRequestsPerHour:   row.ai_max_requests_per_hour,
+      maxTokensPerResponse: row.ai_max_tokens_per_response,
+      dailySpendCutoff:     parseFloat(row.ai_daily_spend_cutoff),
+    }
+  })
+
+  // ── PUT /v1/admin/ai-config ──────────────────────────────────
+
+  app.put('/ai-config', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const body = req.body as {
+      temperature?: number; systemPrompt?: string
+      maxRequestsPerHour?: number; maxTokensPerResponse?: number
+      dailySpendCutoff?: number
+    }
+
+    await adminDb`
+      INSERT INTO operator_settings (id, ai_temperature, ai_system_prompt,
+        ai_max_requests_per_hour, ai_max_tokens_per_response, ai_daily_spend_cutoff)
+      VALUES ('global',
+        ${body.temperature          ?? 0.7},
+        ${body.systemPrompt         ?? ''},
+        ${body.maxRequestsPerHour   ?? 100},
+        ${body.maxTokensPerResponse ?? 1000},
+        ${body.dailySpendCutoff     ?? 5000})
+      ON CONFLICT (id) DO UPDATE SET
+        ai_temperature              = EXCLUDED.ai_temperature,
+        ai_system_prompt            = EXCLUDED.ai_system_prompt,
+        ai_max_requests_per_hour    = EXCLUDED.ai_max_requests_per_hour,
+        ai_max_tokens_per_response  = EXCLUDED.ai_max_tokens_per_response,
+        ai_daily_spend_cutoff       = EXCLUDED.ai_daily_spend_cutoff,
+        updated_at                  = NOW()
+    `
     return reply.status(204).send()
   })
 
