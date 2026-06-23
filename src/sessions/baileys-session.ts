@@ -76,7 +76,7 @@ export class BaileysSession implements IWhatsAppSession {
 
     // If WHATSAPP_PROXY_URL is set (e.g. socks5://user:pass@host:port),
     // route through it so WhatsApp accepts connections from this server IP.
-    let agent: import('http').Agent | undefined
+    let agent: import('https').Agent | undefined
     const proxyUrl = process.env.WHATSAPP_PROXY_URL
     if (proxyUrl) {
       const { SocksProxyAgent } = await import('socks-proxy-agent')
