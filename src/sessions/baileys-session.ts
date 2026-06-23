@@ -74,14 +74,24 @@ export class BaileysSession implements IWhatsAppSession {
 
     const { state, saveCreds } = await makeAuthState(this.sessionId)
 
+    // If WHATSAPP_PROXY_URL is set (e.g. socks5://user:pass@host:port),
+    // route through it so WhatsApp accepts connections from this server IP.
+    let agent: import('http').Agent | undefined
+    const proxyUrl = process.env.WHATSAPP_PROXY_URL
+    if (proxyUrl) {
+      const { SocksProxyAgent } = await import('socks-proxy-agent')
+      agent = new SocksProxyAgent(proxyUrl)
+    }
+
     this.socket = makeWASocket({
       auth: state,
       browser: this._fingerprint.browser,
       logger: baileysLogger,
       printQRInTerminal: false,
       generateHighQualityLinkPreview: false,
-      // Disable store — we manage message history ourselves
+      connectTimeoutMs: 30_000,
       getMessage: async () => undefined,
+      ...(agent ? { agent } : {}),
     })
 
     this.socket.ev.on('creds.update', saveCreds)
