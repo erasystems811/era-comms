@@ -1,12 +1,11 @@
 -- ============================================================
 -- ERA COMMS — COMPLETE DATABASE SCHEMA
 -- Migration 001: Foundation
--- PostgreSQL 15+ with TimescaleDB
+-- PostgreSQL 15+
 -- ============================================================
 
 -- EXTENSIONS
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
-CREATE EXTENSION IF NOT EXISTS "timescaledb";
 
 -- APPLICATION ROLES
 -- On managed cloud databases (Timescale Cloud, RDS, Supabase, etc.) the
@@ -967,10 +966,9 @@ CREATE INDEX IF NOT EXISTS idx_voice_calls_client  ON voice_calls (client_id, in
 CREATE INDEX IF NOT EXISTS idx_voice_calls_contact ON voice_calls (contact_id);
 
 -- ============================================================
--- SECTION 16: USAGE EVENTS — TimescaleDB Hypertable
+-- SECTION 16: USAGE EVENTS
 -- Append-only. Never queried for enforcement (Redis handles that).
 -- Source of truth for billing audit and analytics.
--- Partitioned by occurred_at.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS usage_events (
@@ -994,21 +992,15 @@ CREATE TABLE IF NOT EXISTS usage_events (
 
   occurred_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-  PRIMARY KEY (id, occurred_at)
+  PRIMARY KEY (id)
 );
-
-SELECT create_hypertable('usage_events', 'occurred_at', if_not_exists => true);
 
 CREATE INDEX IF NOT EXISTS idx_usage_client_time ON usage_events (client_id, occurred_at DESC);
 
--- Raw events retained 90 days; aggregates are permanent
-SELECT add_retention_policy('usage_events', INTERVAL '90 days', if_not_exists => true);
-
--- Hourly aggregate — used for dashboard and recent billing checks
-CREATE MATERIALIZED VIEW IF NOT EXISTS usage_hourly
-WITH (timescaledb.continuous) AS
+-- Hourly aggregate view — plain PostgreSQL, no TimescaleDB needed
+CREATE OR REPLACE VIEW usage_hourly AS
 SELECT
-  time_bucket('1 hour', occurred_at) AS bucket,
+  date_trunc('hour', occurred_at) AS bucket,
   client_id,
   event_type,
   SUM(quantity)  AS total_quantity,
@@ -1016,34 +1008,21 @@ SELECT
 FROM usage_events
 GROUP BY 1, 2, 3;
 
-SELECT add_continuous_aggregate_policy('usage_hourly',
-  start_offset => INTERVAL '3 hours',
-  end_offset   => INTERVAL '1 hour',
-  schedule_interval => INTERVAL '1 hour',
-  if_not_exists => true);
-
--- Daily aggregate — used for plan cap enforcement checks and reporting
-CREATE MATERIALIZED VIEW IF NOT EXISTS usage_daily
-WITH (timescaledb.continuous) AS
+-- Daily aggregate view — used by billing and reporting queries
+CREATE OR REPLACE VIEW usage_daily AS
 SELECT
-  time_bucket('1 day', occurred_at) AS bucket,
+  date_trunc('day', occurred_at) AS bucket,
   client_id,
   event_type,
   SUM(quantity)  AS total_quantity,
   COUNT(*)       AS event_count
 FROM usage_events
 GROUP BY 1, 2, 3;
-
-SELECT add_continuous_aggregate_policy('usage_daily',
-  start_offset => INTERVAL '3 days',
-  end_offset   => INTERVAL '1 day',
-  schedule_interval => INTERVAL '1 day',
-  if_not_exists => true);
 
 -- ============================================================
--- SECTION 17: SESSION HEALTH SNAPSHOTS — TimescaleDB Hypertable
+-- SECTION 17: SESSION HEALTH SNAPSHOTS
 -- Written by the monitoring service every 60 seconds per session.
--- Feeds the operator dashboard. Retained 30 days.
+-- Feeds the operator dashboard.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS session_health_snapshots (
@@ -1058,10 +1037,6 @@ CREATE TABLE IF NOT EXISTS session_health_snapshots (
 
   PRIMARY KEY (session_id, snapshot_at)
 );
-
-SELECT create_hypertable('session_health_snapshots', 'snapshot_at', if_not_exists => true);
-
-SELECT add_retention_policy('session_health_snapshots', INTERVAL '30 days', if_not_exists => true);
 
 -- ============================================================
 -- SECTION 18: ALERT HISTORY

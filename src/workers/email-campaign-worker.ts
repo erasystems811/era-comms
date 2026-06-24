@@ -11,6 +11,7 @@ import { Worker, type Job } from 'bullmq'
 import { adminDb }          from '../db/client.js'
 import { logger }           from '../shared/logger.js'
 import { postalSend }       from '../services/postal.js'
+import { sendEmail }        from '../shared/email.js'
 import { maybeCompleteCampaign } from '../services/email-campaigns.js'
 import { QUEUE }            from '../queues/definitions.js'
 import { config }           from '../shared/config.js'
@@ -65,7 +66,11 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
   const subject = row.subject
     .replace(/\{\{first_name\}\}/gi, name)
 
-  const result = await postalSend({
+  // Try Postal first (high-volume, dedicated IP). Fall back to SMTP when Postal isn't set up yet.
+  let sent = false
+  let postalMessageId: string | null = null
+
+  const postalResult = await postalSend({
     to:       [email],
     from:     `${row.from_name} <${row.from_email}>`,
     subject,
@@ -73,18 +78,25 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
     tag:      campaignId,
   })
 
-  // Record Postal message ID (may be null if Postal not yet connected)
+  if (postalResult) {
+    sent = true
+    postalMessageId = postalResult.messageId
+  } else {
+    // Postal not configured — fall back to SMTP
+    sent = await sendEmail({ to: email, subject, html })
+  }
+
   await adminDb`
     UPDATE email_sends
     SET
-      postal_message_id = ${result?.messageId ?? null},
-      status            = ${result ? 'sent' : 'failed'},
+      postal_message_id = ${postalMessageId},
+      status            = ${sent ? 'sent' : 'failed'},
       updated_at        = NOW()
     WHERE campaign_id = ${campaignId}
       AND email       = ${email}
   `
 
-  if (result) {
+  if (sent) {
     await adminDb`
       UPDATE email_campaigns
       SET total_sent = total_sent + 1, updated_at = NOW()
@@ -95,7 +107,7 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
   // Check if campaign is fully complete
   await maybeCompleteCampaign(campaignId)
 
-  log.debug({ campaignId, email, postalId: result?.messageId }, 'Email send job done')
+  log.debug({ campaignId, email, postalId: postalMessageId, via: postalMessageId ? 'postal' : 'smtp' }, 'Email send job done')
 }
 
 export function startEmailCampaignWorker(): Worker {
