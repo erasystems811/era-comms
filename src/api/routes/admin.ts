@@ -928,6 +928,35 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true })
   })
 
+  // ── POST /v1/admin/sessions/:id/test-message ────────────────
+  // Send a test WhatsApp message directly from the operator hub.
+
+  app.post('/sessions/:id/test-message', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id: sessionId } = req.params as { id: string }
+    const { to, content } = req.body as { to?: string; content?: string }
+
+    if (!to || !E164_RE.test(to))
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'to must be E.164 (e.g. +2348012345678)' })
+    if (!content?.trim())
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'content is required' })
+
+    type SessionRow = { client_id: string }
+    const rows = (await adminDb`SELECT client_id FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as SessionRow[]
+    if (!rows[0]) throw new NotFoundError('Session')
+
+    const result = await sendMessage({
+      clientId:    rows[0].client_id,
+      sessionId,
+      to,
+      content,
+      contentType: 'text',
+    })
+
+    return reply.send({ ok: true, messageId: result.messageId })
+  })
+
   // ── POST /v1/admin/sessions/:id/reset-credentials ───────────
   // Wipes corrupted WhatsApp credentials → forces fresh QR scan.
 
