@@ -326,6 +326,13 @@ async function start(): Promise<void> {
         description: cmd.description,
         pictureUrl: cmd.pictureUrl,
       }).catch((err: unknown) => workerLogger.warn({ err }, 'set_profile command failed'))
+    } else if (cmd.command === 'request_pairing_code') {
+      session.requestPairingCode(cmd.phoneNumber)
+        .then((code) => generalRedis.publish(CHANNEL.pairingCodeResult(SESSION_ID), JSON.stringify({ ok: true, code })))
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err)
+          void generalRedis.publish(CHANNEL.pairingCodeResult(SESSION_ID), JSON.stringify({ ok: false, error: message }))
+        })
     }
   })
 

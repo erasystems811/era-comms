@@ -19,9 +19,10 @@ export const QUEUE = {
 // ── REDIS CHANNELS (pub/sub) ──────────────────────────────────
 
 export const CHANNEL = {
-  sessionStatus: (sessionId: string) => `session:${sessionId}:status`,
-  sessionCommand: (sessionId: string) => `session:${sessionId}:commands`,
-  sessionQR: (sessionId: string) => `session:${sessionId}:qr`,
+  sessionStatus:      (sessionId: string) => `session:${sessionId}:status`,
+  sessionCommand:     (sessionId: string) => `session:${sessionId}:commands`,
+  sessionQR:          (sessionId: string) => `session:${sessionId}:qr`,
+  pairingCodeResult:  (sessionId: string) => `session:${sessionId}:pairing_code_result`,
 } as const
 
 // ── REDIS KEYS ────────────────────────────────────────────────
@@ -89,6 +90,7 @@ export interface AnalyticsJob {
 export type SessionCommand =
   | { command: 'disconnect' | 'reconnect' | 'pause_outbound' | 'resume_outbound' }
   | { command: 'set_profile'; name?: string | null; description?: string | null; pictureUrl?: string | null }
+  | { command: 'request_pairing_code'; phoneNumber: string }
 
 // Status update sent via Redis pub/sub (worker → supervisor)
 export interface SessionStatusUpdate {

@@ -244,6 +244,14 @@ export class BaileysSession implements IWhatsAppSession {
     }
   }
 
+  async requestPairingCode(phoneNumber: string): Promise<string> {
+    if (!this.socket) throw new SessionError('Session socket not initialised — call connect() first')
+    // Strip any non-digit characters (e.g. leading +)
+    const digits = phoneNumber.replace(/\D/g, '')
+    const code = await this.socket.requestPairingCode(digits)
+    return code
+  }
+
   // ── PRIVATE ─────────────────────────────────────────────────
 
   private emitQR(event: QREvent): void {

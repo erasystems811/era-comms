@@ -12,13 +12,13 @@ import { Redis } from 'ioredis'
 import { adminDb } from '../../db/client.js'
 import { clearCredentialCache } from '../../sessions/credential-store.js'
 import { redis } from '../../db/redis.js'
+import { KEY, CHANNEL } from '../../queues/definitions.js'
 import { config } from '../../shared/config.js'
 import { currentLimit } from '../../db/redis.js'
 import { invalidatePlanCache } from '../../services/plan.js'
 import { sendMessage } from '../../services/messaging.js'
 import { sendEmail, portalAccessEmail, apiKeyEmail } from '../../shared/email.js'
 import { NotFoundError, ConflictError } from '../../shared/errors.js'
-import { CHANNEL } from '../../queues/definitions.js'
 import { sendSessionCommand } from '../../sessions/supervisor.js'
 import requestsRoutes from './requests.js'
 import observabilityRoutes from './observability.js'
@@ -958,6 +958,48 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     await sendSessionCommand(sessionId, { command: 'reconnect' })
 
     return reply.send({ ok: true })
+  })
+
+  // ── POST /v1/admin/sessions/:id/pairing-code ─────────────────
+  // Request a WhatsApp pairing code (OTP alternative to QR scanning).
+
+  app.post('/sessions/:id/pairing-code', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id: sessionId } = req.params as { id: string }
+    const { phoneNumber } = req.body as { phoneNumber?: string }
+    if (!phoneNumber) return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'phoneNumber is required' })
+
+    const rows = (await adminDb`SELECT id FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as Array<{ id: string }>
+    if (!rows[0]) throw new NotFoundError('Session')
+
+    // Subscribe to the result channel before sending the command to avoid a race
+    const sub = new Redis(config.redis.url, { maxRetriesPerRequest: null })
+    const resultChannel = CHANNEL.pairingCodeResult(sessionId)
+
+    const codePromise = new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        sub.unsubscribe(resultChannel).then(() => sub.disconnect()).catch(() => {})
+        reject(new Error('Pairing code request timed out — ensure the session is running'))
+      }, 15_000)
+
+      sub.subscribe(resultChannel, (err) => {
+        if (err) { clearTimeout(timeout); reject(err) }
+      })
+
+      sub.on('message', (_ch, msg) => {
+        clearTimeout(timeout)
+        void sub.unsubscribe(resultChannel).then(() => sub.disconnect())
+        const result = JSON.parse(msg) as { ok: boolean; code?: string; error?: string }
+        if (result.ok && result.code) resolve(result.code)
+        else reject(new Error(result.error ?? 'Failed to get pairing code'))
+      })
+    })
+
+    await sendSessionCommand(sessionId, { command: 'request_pairing_code', phoneNumber })
+
+    const code = await codePromise
+    return reply.send({ code })
   })
 
   // ── GET /v1/admin/sessions/:id/qr (WebSocket) ──────────────

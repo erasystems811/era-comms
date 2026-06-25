@@ -70,6 +70,10 @@ export interface IWhatsAppSession {
   // Push WhatsApp Business profile fields to the connected account.
   applyProfile(profile: SessionProfile): Promise<void>
 
+  // Request a pairing code (OTP alternative to QR scanning).
+  // phoneNumber must be in E.164 digits only (no +), e.g. "2348012345678".
+  requestPairingCode(phoneNumber: string): Promise<string>
+
   getStatus(): SessionStatus
 
   // Device fingerprint that must be preserved and restored on reconnect.
