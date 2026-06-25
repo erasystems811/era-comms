@@ -927,6 +927,35 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true })
   })
 
+  // ── POST /v1/admin/sessions/:id/reset-credentials ───────────
+  // Wipes corrupted WhatsApp credentials → forces fresh QR scan.
+
+  app.post('/sessions/:id/reset-credentials', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id: sessionId } = req.params as { id: string }
+
+    const rows = (await adminDb`SELECT id FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as Array<{ id: string }>
+    if (!rows[0]) throw new NotFoundError('Session')
+
+    // Wipe Redis cache and PostgreSQL credentials
+    await clearCredentialCache(sessionId)
+    await adminDb`
+      UPDATE whatsapp_sessions
+      SET credentials_encrypted  = NULL,
+          credentials_iv         = NULL,
+          credentials_tag        = NULL,
+          credentials_updated_at = NULL,
+          status                 = 'disconnected'
+      WHERE id = ${sessionId}
+    `
+
+    // Reconnect so the worker restarts and generates a fresh QR
+    await sendSessionCommand(sessionId, { command: 'reconnect' })
+
+    return reply.send({ ok: true })
+  })
+
   // ── GET /v1/admin/sessions/:id/qr (WebSocket) ──────────────
 
   app.get('/sessions/:id/qr', { websocket: true }, (stream, req) => {
