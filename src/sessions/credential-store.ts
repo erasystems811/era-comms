@@ -1,4 +1,22 @@
 import { initAuthCreds } from '@whiskeysockets/baileys'
+
+// Baileys stores keys as Uint8Array / Buffer. Plain JSON.stringify serialises
+// Uint8Array as {"0":1,"1":2,...} which JSON.parse brings back as a plain object
+// — not a Buffer — causing ERR_INVALID_ARG_TYPE in the noise-protocol handshake.
+// These replacer/reviver round-trip everything through {type:'Buffer',data:[...]}.
+const bufReplacer = (_k: string, v: unknown) =>
+  v instanceof Uint8Array || Buffer.isBuffer(v)
+    ? { type: 'Buffer', data: Array.from(v as Uint8Array) }
+    : v
+
+const bufReviver = (_k: string, v: unknown) => {
+  if (v && typeof v === 'object' && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>
+    if (o['type'] === 'Buffer' && Array.isArray(o['data']))
+      return Buffer.from(o['data'] as number[])
+  }
+  return v
+}
 import type { AuthenticationState, SignalDataTypeMap } from '@whiskeysockets/baileys'
 import { redis } from '../db/redis.js'
 import { adminDb } from '../db/client.js'
@@ -27,7 +45,7 @@ export async function loadCredentials(
   // Try Redis cache first
   const cached = await redis.get(KEY.sessionCreds(sessionId))
   if (cached) {
-    return JSON.parse(cached) as AuthenticationState['creds']
+    return JSON.parse(cached, bufReviver) as AuthenticationState['creds']
   }
 
   // Fall back to PostgreSQL
@@ -58,7 +76,7 @@ export async function loadCredentials(
       config.encryption.sessionCredentialsKey,
     )
 
-    const creds = JSON.parse(plaintext) as AuthenticationState['creds']
+    const creds = JSON.parse(plaintext, bufReviver) as AuthenticationState['creds']
 
     // Warm the cache for subsequent reconnects
     await redis.set(KEY.sessionCreds(sessionId), plaintext)
@@ -74,7 +92,7 @@ export async function saveCredentials(
   sessionId: string,
   creds: AuthenticationState['creds'],
 ): Promise<void> {
-  const plaintext = JSON.stringify(creds)
+  const plaintext = JSON.stringify(creds, bufReplacer)
   const payload = encrypt(plaintext, config.encryption.sessionCredentialsKey)
 
   // Write to PostgreSQL (source of truth) and Redis cache atomically from
@@ -124,7 +142,7 @@ export async function makeAuthState(
         for (let i = 0; i < ids.length; i++) {
           const val = values[i]
           if (val) {
-            result[ids[i]!] = JSON.parse(val) as SignalDataTypeMap[T]
+            result[ids[i]!] = JSON.parse(val, bufReviver) as SignalDataTypeMap[T]
           }
         }
 
@@ -145,7 +163,7 @@ export async function makeAuthState(
             if (value === null) {
               pipeline.del(key)
             } else {
-              pipeline.set(key, JSON.stringify(value))
+              pipeline.set(key, JSON.stringify(value, bufReplacer))
             }
           }
         }
