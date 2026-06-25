@@ -128,7 +128,7 @@ export class BaileysSession implements IWhatsAppSession {
       throw new SessionError(`Session ${this.sessionId} is not connected`)
     }
 
-    const jid = jidNormalizedUser(`${to}@s.whatsapp.net`)
+    const jid = jidNormalizedUser(`${to.replace(/^\+/, '')}@s.whatsapp.net`)
     const result = await this.socket.sendMessage(jid, { text: content })
 
     if (!result?.key?.id) {
@@ -144,7 +144,7 @@ export class BaileysSession implements IWhatsAppSession {
   async sendComposing(to: string, durationMs: number): Promise<void> {
     if (!this.socket || this._status !== 'connected') return
 
-    const jid = jidNormalizedUser(`${to}@s.whatsapp.net`)
+    const jid = jidNormalizedUser(`${to.replace(/^\+/, '')}@s.whatsapp.net`)
     await this.socket.sendPresenceUpdate('composing', jid)
 
     // Hold for the specified duration, then clear the typing indicator
