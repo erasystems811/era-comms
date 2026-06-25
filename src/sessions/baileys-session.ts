@@ -114,11 +114,10 @@ export class BaileysSession implements IWhatsAppSession {
   async disconnect(): Promise<void> {
     if (!this.socket) return
     try {
-      await this.socket.logout()
-    } catch {
-      // logout may fail if already disconnected — that's fine
-    } finally {
       this.socket.end(undefined)
+    } catch {
+      // ignore
+    } finally {
       this.socket = null
       this._status = 'disconnected'
     }

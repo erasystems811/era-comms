@@ -928,6 +928,20 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.send({ ok: true })
   })
 
+  // ── POST /v1/admin/sessions/:id/unban ───────────────────────
+  // Reset a spuriously-banned session back to disconnected so it can reconnect.
+
+  app.post('/sessions/:id/unban', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id: sessionId } = req.params as { id: string }
+    await adminDb`
+      UPDATE whatsapp_sessions
+      SET status = 'disconnected', updated_at = NOW()
+      WHERE id = ${sessionId} AND status = 'banned'
+    `
+    return reply.send({ ok: true })
+  })
+
   // ── POST /v1/admin/sessions/:id/test-message ────────────────
   // Send a test WhatsApp message directly from the operator hub.
 
