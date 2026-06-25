@@ -308,14 +308,14 @@ async function start(): Promise<void> {
         await incrementDailyCount(SESSION_ID)
         await recordMessageSent(clientId)
 
-        void logEvent({
+        await logEvent({
           eventType: 'message_sent',
           severity:  'info',
           detail:    `Message sent to ${to}`,
           clientId,
           sessionId: SESSION_ID,
           metadata:  { messageId, to, waMessageId: result.waMessageId, wasVaried, warmupStage: warmup.stage },
-        })
+        }).catch((err: unknown) => workerLogger.error({ err }, 'message_sent event write failed'))
 
         await adminDb`
           UPDATE messages
