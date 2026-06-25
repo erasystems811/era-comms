@@ -100,14 +100,14 @@ export function portalAccessEmail(opts: {
 export function apiKeyEmail(opts: {
   businessName: string
   email: string
-  portalUrl: string
+  revealUrl: string
   keyLabel: string
 }): EmailOptions {
-  const { businessName, email, portalUrl, keyLabel } = opts
+  const { businessName, revealUrl, keyLabel } = opts
   return {
-    to:      email,
-    subject: `ERA Comms API key ready — ${keyLabel}`,
-    text:    `Hi ${businessName},\n\nAn API key "${keyLabel}" is ready for your account.\n\nLog in to your business portal to access your API keys: ${portalUrl}/biz/login\n\nERA Systems`,
+    to:      opts.email,
+    subject: `Your ERA Comms API key is ready`,
+    text:    `Hi ${businessName},\n\nYour API key "${keyLabel}" is ready.\n\nClick the link below to view it. This link works once and expires in 7 days:\n\n${revealUrl}\n\nERA Systems`,
     html: `
 <!DOCTYPE html>
 <html>
@@ -120,16 +120,16 @@ export function apiKeyEmail(opts: {
         <span style="font-size:22px;font-weight:700;color:#e2e0ef"> Comms</span>
       </div>
       <h1 style="font-size:20px;font-weight:700;color:#e2e0ef;margin:0 0 8px">Your API key is ready</h1>
-      <p style="color:#8b8a9b;margin:0 0 24px">An API key <strong style="color:#e2e0ef">"${keyLabel}"</strong> has been created for your ERA Comms account.</p>
+      <p style="color:#8b8a9b;margin:0 0 24px">An API key <strong style="color:#e2e0ef">"${keyLabel}"</strong> has been generated for <strong style="color:#e2e0ef">${businessName}</strong>.</p>
 
       <div style="background:#1a1729;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px;margin-bottom:24px">
-        <p style="margin:0 0 6px;font-size:14px;color:#8b8a9b">Log in to your business portal to copy your API key and view integration guides.</p>
-        <a href="${portalUrl}/biz/login" style="color:#bf7c93;font-size:14px">${portalUrl}/biz/login</a>
+        <p style="margin:0 0 8px;font-size:13px;color:#8b8a9b">Click the button below to reveal your key. <strong style="color:#e2e0ef">This link works only once</strong> and expires in 7 days.</p>
+        <p style="margin:0;font-size:12px;color:#4a4958">Keep your key safe — do not share it publicly.</p>
       </div>
 
-      <a href="${portalUrl}/biz/login" style="display:inline-block;background:#bf7c93;color:#fff;text-decoration:none;padding:12px 28px;border-radius:10px;font-weight:600;font-size:14px">Go to Portal</a>
+      <a href="${revealUrl}" style="display:inline-block;background:#bf7c93;color:#fff;text-decoration:none;padding:12px 28px;border-radius:10px;font-weight:600;font-size:14px">Reveal my API key</a>
 
-      <p style="margin:32px 0 0;font-size:12px;color:#4a4958">ERA Systems · If you didn't expect this, contact your ERA Systems representative.</p>
+      <p style="margin:32px 0 0;font-size:12px;color:#4a4958">ERA Systems · If you did not expect this email, ignore it — your account is safe.</p>
     </td></tr>
   </table>
 </body>

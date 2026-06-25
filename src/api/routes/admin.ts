@@ -608,29 +608,50 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     `) as unknown as Array<{ id: string; label: string }>
     if (!keys[0]) throw new NotFoundError('API key')
 
-    const client    = clients[0]!
-    const portalUrl = config.isProduction
-      ? 'https://hub.erasystems.com.ng'
-      : 'http://localhost:5173'
+    const client = clients[0]!
+    const key    = keys[0]!
 
-    // Send email if contact email is on file and Resend is configured
+    // Rotate the key — generate a fresh one and update the hash in the DB.
+    // The previous key is immediately invalidated.
+    const rawKey  = `era_${randomBytes(24).toString('hex')}`
+    const keyHash = createHash('sha256').update(rawKey).digest('hex')
+    const prefix  = rawKey.slice(0, 12)
+
+    await adminDb`
+      UPDATE api_keys
+      SET key_hash = ${keyHash}, key_prefix = ${prefix}, updated_at = NOW()
+      WHERE id = ${keyId}
+    `
+
+    // Create a one-time reveal token valid for 7 days
+    const revealToken = randomBytes(32).toString('hex')
+
+    await adminDb`
+      INSERT INTO api_key_reveal_tokens (token, api_key_id, key_value, label, client_name)
+      VALUES (${revealToken}, ${keyId}, ${rawKey}, ${key.label}, ${client.name})
+    `
+
+    const hubUrl    = config.isProduction ? 'https://hub.erasystems.com.ng' : 'http://localhost:5173'
+    const revealUrl = `${hubUrl}/reveal-key/${revealToken}`
+
     if (client.contact_email) {
       sendEmail(apiKeyEmail({
         businessName: client.name,
         email:        client.contact_email,
-        portalUrl,
-        keyLabel:     keys[0].label || 'API Key',
+        revealUrl,
+        keyLabel:     key.label || 'API Key',
       })).catch(err => req.log.error({ err }, 'API key email failed'))
     }
 
     await adminDb`
       INSERT INTO audit_log (actor, actor_label, action, target, target_id, detail)
       VALUES ('operator', 'ERA Systems', 'sent_api_key_link', 'api_key', ${keyId},
-        ${'Secure link sent to ' + (client.contact_email ?? 'no email on file')})
+        ${'One-time reveal link sent to ' + (client.contact_email ?? 'no email on file')})
     `
 
     return reply.status(204).send()
   })
+
 
   // ── GET /v1/admin/sessions ──────────────────────────────────
 
