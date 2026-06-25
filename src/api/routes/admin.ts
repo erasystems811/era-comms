@@ -11,6 +11,7 @@ import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { Redis } from 'ioredis'
 import { adminDb } from '../../db/client.js'
 import { clearCredentialCache } from '../../sessions/credential-store.js'
+import { redis } from '../../db/redis.js'
 import { config } from '../../shared/config.js'
 import { currentLimit } from '../../db/redis.js'
 import { invalidatePlanCache } from '../../services/plan.js'
@@ -938,8 +939,11 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     const rows = (await adminDb`SELECT id FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as Array<{ id: string }>
     if (!rows[0]) throw new NotFoundError('Session')
 
-    // Wipe Redis cache and PostgreSQL credentials
+    // Wipe ALL Redis keys for this session (creds + signal keys)
     await clearCredentialCache(sessionId)
+    const allKeys = await redis.keys(`session:${sessionId}:*`)
+    if (allKeys.length > 0) await redis.del(...allKeys)
+
     await adminDb`
       UPDATE whatsapp_sessions
       SET credentials_encrypted  = NULL,
