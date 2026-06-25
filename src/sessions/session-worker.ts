@@ -122,6 +122,28 @@ async function start(): Promise<void> {
 
   // ── CONNECT ───────────────────────────────────────────────────
 
+  // Apply WhatsApp Business profile once the session connects.
+  // Runs automatically on first connect and on every reconnect.
+  session.onConnected(async () => {
+    type ProfileRow = { profile_name: string | null; profile_description: string | null; profile_picture_url: string | null }
+    const profileRows = await q<ProfileRow>(
+      adminDb`SELECT profile_name, profile_description, profile_picture_url FROM whatsapp_sessions WHERE id = ${SESSION_ID}`,
+    )
+    const p = profileRows[0]
+    if (p && (p.profile_name || p.profile_description || p.profile_picture_url)) {
+      try {
+        await session.applyProfile({
+          name: p.profile_name,
+          description: p.profile_description,
+          pictureUrl: p.profile_picture_url,
+        })
+        workerLogger.info('WhatsApp Business profile applied')
+      } catch (err) {
+        workerLogger.warn({ err }, 'Failed to apply WhatsApp Business profile')
+      }
+    }
+  })
+
   await publishStatus({ status: 'connecting' })
   await session.connect()
 
@@ -298,6 +320,12 @@ async function start(): Promise<void> {
 
     if (cmd.command === 'disconnect') {
       void session.disconnect()
+    } else if (cmd.command === 'set_profile') {
+      void session.applyProfile({
+        name: cmd.name,
+        description: cmd.description,
+        pictureUrl: cmd.pictureUrl,
+      }).catch((err: unknown) => workerLogger.warn({ err }, 'set_profile command failed'))
     }
   })
 

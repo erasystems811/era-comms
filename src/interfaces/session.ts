@@ -28,6 +28,12 @@ export type QREvent =
   | { type: 'error'; reason: string }    // unrecoverable error during QR flow
   | { type: 'restart' }                  // WhatsApp 515 — worker must restart cleanly
 
+export interface SessionProfile {
+  name?: string | null
+  description?: string | null
+  pictureUrl?: string | null
+}
+
 export interface IWhatsAppSession {
   readonly sessionId: string
   readonly phoneNumber: string
@@ -57,6 +63,12 @@ export interface IWhatsAppSession {
 
   // Register a handler for inbound messages. Only one handler per session.
   onMessage(handler: (msg: InboundMessage) => Promise<void>): void
+
+  // Register a callback that fires once when the session successfully connects.
+  onConnected(handler: () => Promise<void>): void
+
+  // Push WhatsApp Business profile fields to the connected account.
+  applyProfile(profile: SessionProfile): Promise<void>
 
   getStatus(): SessionStatus
 

@@ -18,6 +18,7 @@ import { sendMessage } from '../../services/messaging.js'
 import { sendEmail, portalAccessEmail, apiKeyEmail } from '../../shared/email.js'
 import { NotFoundError, ConflictError } from '../../shared/errors.js'
 import { CHANNEL } from '../../queues/definitions.js'
+import { sendSessionCommand } from '../../sessions/supervisor.js'
 import requestsRoutes from './requests.js'
 import observabilityRoutes from './observability.js'
 
@@ -866,6 +867,43 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     await req.server.supervisor.stopSession(id)
     return reply.status(204).send()
+  })
+
+  // ── PATCH /v1/admin/sessions/:id/profile ───────────────────
+
+  app.patch('/sessions/:id/profile', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+
+    const { id: sessionId } = req.params as { id: string }
+    const body = req.body as {
+      name?: string | null
+      description?: string | null
+      pictureUrl?: string | null
+    }
+
+    const rows = (await adminDb`SELECT id, status FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as Array<{ id: string; status: string }>
+    if (!rows[0]) throw new NotFoundError('Session')
+
+    await adminDb`
+      UPDATE whatsapp_sessions
+      SET profile_name        = ${body.name        ?? null},
+          profile_description = ${body.description ?? null},
+          profile_picture_url = ${body.pictureUrl  ?? null},
+          updated_at          = NOW()
+      WHERE id = ${sessionId}
+    `
+
+    // If session is active, push the profile to WhatsApp immediately
+    if (rows[0].status === 'active') {
+      await sendSessionCommand(sessionId, {
+        command: 'set_profile',
+        name:        body.name,
+        description: body.description,
+        pictureUrl:  body.pictureUrl,
+      })
+    }
+
+    return reply.send({ ok: true })
   })
 
   // ── GET /v1/admin/sessions/:id/qr (WebSocket) ──────────────

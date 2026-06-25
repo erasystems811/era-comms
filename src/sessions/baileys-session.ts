@@ -10,6 +10,7 @@ import pino from 'pino'
 import type {
   IWhatsAppSession,
   SessionStatus,
+  SessionProfile,
   InboundMessage,
   SendMessageResult,
   QREvent,
@@ -43,6 +44,7 @@ export class BaileysSession implements IWhatsAppSession {
   private _status: SessionStatus = 'disconnected'
   private _fingerprint: DeviceFingerprint | null = null
   private messageHandler: ((msg: InboundMessage) => Promise<void>) | null = null
+  private connectedHandler: (() => Promise<void>) | null = null
 
   // QR event listeners — one per concurrent WebSocket connection (usually one)
   private qrListeners: Array<(event: QREvent) => void> = []
@@ -212,6 +214,31 @@ export class BaileysSession implements IWhatsAppSession {
     this.messageHandler = handler
   }
 
+  onConnected(handler: () => Promise<void>): void {
+    this.connectedHandler = handler
+  }
+
+  async applyProfile(profile: SessionProfile): Promise<void> {
+    if (!this.socket || this._status !== 'connected') return
+
+    if (profile.name) {
+      await this.socket.updateProfileName(profile.name)
+    }
+
+    if (profile.description) {
+      await this.socket.updateProfileStatus(profile.description)
+    }
+
+    if (profile.pictureUrl) {
+      const res = await fetch(profile.pictureUrl)
+      if (res.ok) {
+        const buf = Buffer.from(await res.arrayBuffer())
+        const jid = this.socket.user?.id
+        if (jid) await this.socket.updateProfilePicture(jid, buf)
+      }
+    }
+  }
+
   // ── PRIVATE ─────────────────────────────────────────────────
 
   private emitQR(event: QREvent): void {
@@ -233,6 +260,7 @@ export class BaileysSession implements IWhatsAppSession {
       logger.info({ sessionId: this.sessionId }, 'WhatsApp session connected')
       await this.updateDbStatus('active')
       this.emitQR({ type: 'connected' })
+      if (this.connectedHandler) void this.connectedHandler()
     }
 
     if (connection === 'close') {

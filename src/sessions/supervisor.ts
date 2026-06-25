@@ -332,9 +332,8 @@ const commandPublisher = new Redis(config.redis.url, { maxRetriesPerRequest: nul
 
 export async function sendSessionCommand(
   sessionId: string,
-  command: SessionCommand['command'],
+  payload: SessionCommand,
 ): Promise<void> {
-  const payload: SessionCommand = { command }
   await commandPublisher.publish(CHANNEL.sessionCommand(sessionId), JSON.stringify(payload))
 }
 

@@ -86,9 +86,9 @@ export interface AnalyticsJob {
 }
 
 // Session command sent via Redis pub/sub (supervisor → worker)
-export interface SessionCommand {
-  command: 'disconnect' | 'reconnect' | 'pause_outbound' | 'resume_outbound'
-}
+export type SessionCommand =
+  | { command: 'disconnect' | 'reconnect' | 'pause_outbound' | 'resume_outbound' }
+  | { command: 'set_profile'; name?: string | null; description?: string | null; pictureUrl?: string | null }
 
 // Status update sent via Redis pub/sub (worker → supervisor)
 export interface SessionStatusUpdate {
