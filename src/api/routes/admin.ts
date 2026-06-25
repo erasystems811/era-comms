@@ -420,7 +420,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       sessions: sessionRows.map(r => ({
         id:                r.id,
         phoneNumber:       r.phone_number,
-        status:            r.status,
+        status:            r.status === 'active' ? 'connected' : r.status,
         riskScore:         parseFloat(r.risk_score),
         role:              r.role,
         createdAt:         r.created_at,
@@ -675,7 +675,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return rows.map(r => ({
       id:                r.id,
       phoneNumber:       r.phone_number,
-      status:            r.status,
+      status:            r.status === 'active' ? 'connected' : r.status,
       riskScore:         parseFloat(r.risk_score),
       role:              r.role,
       createdAt:         r.created_at,
