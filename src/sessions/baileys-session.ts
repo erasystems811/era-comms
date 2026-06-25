@@ -230,12 +230,17 @@ export class BaileysSession implements IWhatsAppSession {
     }
 
     if (profile.pictureUrl) {
-      const res = await fetch(profile.pictureUrl)
-      if (res.ok) {
-        const buf = Buffer.from(await res.arrayBuffer())
-        const jid = this.socket.user?.id
-        if (jid) await this.socket.updateProfilePicture(jid, buf)
+      let buf: Buffer
+      if (profile.pictureUrl.startsWith('data:')) {
+        const base64 = profile.pictureUrl.split(',')[1] ?? ''
+        buf = Buffer.from(base64, 'base64')
+      } else {
+        const res = await fetch(profile.pictureUrl)
+        if (!res.ok) throw new Error(`Failed to fetch profile picture: ${res.status}`)
+        buf = Buffer.from(await res.arrayBuffer())
       }
+      const jid = this.socket.user?.id
+      if (jid) await this.socket.updateProfilePicture(jid, buf)
     }
   }
 
