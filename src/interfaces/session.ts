@@ -21,11 +21,12 @@ export interface SendMessageResult {
   timestamp: Date
 }
 
-// QR stream emits one of three event shapes until the session connects
+// QR stream emits one of four event shapes until the session connects
 export type QREvent =
   | { type: 'qr'; code: string }         // new QR code, render and display
   | { type: 'connected' }                // session authenticated, QR no longer needed
   | { type: 'error'; reason: string }    // unrecoverable error during QR flow
+  | { type: 'restart' }                  // WhatsApp 515 — worker must restart cleanly
 
 export interface IWhatsAppSession {
   readonly sessionId: string

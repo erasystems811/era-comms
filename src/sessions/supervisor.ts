@@ -196,12 +196,12 @@ export class SessionSupervisor implements ISessionSupervisor {
 
     // Get or reconstruct restart attempt count
     const existing = this.workers.get(sessionId)
-    const attempt = existing?.restartAttempts ?? 0
+    // Clean exit (code 0) = WhatsApp 515 restart signal — don't penalise with backoff
+    const attempt = exitCode === 0 ? 0 : (existing?.restartAttempts ?? 0)
 
-    const backoffMs = Math.min(
-      BACKOFF_BASE_MS * Math.pow(2, attempt),
-      BACKOFF_MAX_MS,
-    )
+    const backoffMs = exitCode === 0
+      ? 500  // Near-immediate restart for WhatsApp-requested reconnect
+      : Math.min(BACKOFF_BASE_MS * Math.pow(2, attempt), BACKOFF_MAX_MS)
     // Add 25% jitter so multiple crashed sessions don't all reconnect simultaneously
     const jitter = backoffMs * 0.25 * Math.random()
     const wait = Math.round(backoffMs + jitter)

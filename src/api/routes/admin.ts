@@ -10,6 +10,7 @@ import { randomBytes, createHash, randomInt } from 'node:crypto'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { Redis } from 'ioredis'
 import { adminDb } from '../../db/client.js'
+import { clearCredentialCache } from '../../sessions/credential-store.js'
 import { config } from '../../shared/config.js'
 import { currentLimit } from '../../db/redis.js'
 import { invalidatePlanCache } from '../../services/plan.js'
@@ -879,9 +880,11 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       }
 
       const { id: sessionId } = req.params as { id: string }
-      const rows = (await adminDb`SELECT id FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as Array<{ id: string }>
+      const rows = (await adminDb`SELECT id, status FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as Array<{ id: string; status: string }>
       if (!rows[0]) { ws.close(1008, 'Session not found'); return }
 
+      // Subscribe BEFORE restarting — avoids a race where the QR is published
+      // between the restart and the subscribe call.
       const subscriber = new Redis(config.redis.url, { maxRetriesPerRequest: null })
       await subscriber.subscribe(CHANNEL.sessionQR(sessionId))
       subscriber.on('message', (_ch: string, msg: string) => {
@@ -890,6 +893,21 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       const cleanup = () => { void subscriber.quit() }
       stream.on('close', cleanup)
       stream.on('error', cleanup)
+
+      // If the session is not currently active, clear stale credentials and
+      // restart the worker so Baileys starts fresh and generates a new QR.
+      // Partially-initialised credentials (keys generated but QR never scanned)
+      // cause an immediate disconnect on reconnect — clearing them fixes this.
+      if (rows[0].status !== 'active') {
+        await clearCredentialCache(sessionId)
+        await adminDb`
+          UPDATE whatsapp_sessions
+          SET credentials_encrypted = NULL, credentials_iv = NULL, credentials_tag = NULL
+          WHERE id = ${sessionId}
+        `
+        await req.server.supervisor.stopSession(sessionId)
+        await req.server.supervisor.startSession(sessionId)
+      }
     })()
   })
 

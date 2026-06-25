@@ -8,7 +8,7 @@
 // analytics            Global queue for async usage event writes.
 
 export const QUEUE = {
-  outbound: (sessionId: string) => `outbound:${sessionId}`,
+  outbound: (sessionId: string) => `outbound-${sessionId}`,
   inbound: 'inbound',
   ai: 'ai',
   webhooks: 'webhooks',

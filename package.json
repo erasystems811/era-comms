@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "tsx watch src/api/server.ts",
     "build": "tsc --project tsconfig.build.json",
-    "start": "node dist/api/server.js",
+    "start": "node dist/index.js",
     "migrate": "tsx src/db/migrate.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

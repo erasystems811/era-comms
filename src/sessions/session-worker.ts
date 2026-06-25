@@ -152,6 +152,13 @@ async function start(): Promise<void> {
           gotEvent = true
           clearTimeout(idleTimeout)
         }
+        if (event.type === 'restart') {
+          // WhatsApp 515: exit cleanly so the supervisor restarts this worker.
+          // The QR WebSocket subscription stays alive and will receive the QR
+          // from the new worker instance.
+          workerLogger.info('Restarting worker on WhatsApp 515 signal')
+          process.exit(0)
+        }
         await generalRedis.publish(CHANNEL.sessionQR(SESSION_ID), JSON.stringify(event))
       }
     } catch {

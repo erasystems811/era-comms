@@ -1,4 +1,5 @@
 import makeWASocket, {
+  Browsers,
   DisconnectReason,
   jidNormalizedUser,
   proto,
@@ -18,8 +19,8 @@ import { adminDb } from '../db/client.js'
 import { logger } from '../shared/logger.js'
 import { SessionError } from '../shared/errors.js'
 
-// Baileys is very verbose — give it a silent logger in production
-const baileysLogger = pino({ level: 'silent' })
+// Temporarily verbose for connection debugging
+const baileysLogger = pino({ level: 'debug' })
 
 // Device fingerprint stored in whatsapp_sessions.device_fingerprint
 // Must be identical on every reconnect for the same session.
@@ -85,7 +86,7 @@ export class BaileysSession implements IWhatsAppSession {
 
     this.socket = makeWASocket({
       auth: state,
-      browser: this._fingerprint.browser,
+      browser: Browsers.windows('Chrome'),
       logger: baileysLogger,
       printQRInTerminal: false,
       generateHighQualityLinkPreview: false,
@@ -243,10 +244,17 @@ export class BaileysSession implements IWhatsAppSession {
         logger.warn({ sessionId: this.sessionId }, 'WhatsApp session logged out / banned')
         await this.updateDbStatus('banned')
         this.emitQR({ type: 'error', reason: 'Session banned or logged out by WhatsApp' })
+      } else if (statusCode === DisconnectReason.restartRequired) {
+        // 515 = WhatsApp asking us to reconnect to a different server.
+        // Signal the session worker to exit cleanly so the supervisor can
+        // restart it immediately. The QR WebSocket subscription stays alive
+        // in the main process and will receive the QR from the new worker.
+        logger.info({ sessionId: this.sessionId }, 'WhatsApp restart required (515) — signalling worker restart')
+        this.emitQR({ type: 'restart' })
       } else {
         this._status = 'disconnected'
         logger.warn(
-          { sessionId: this.sessionId, statusCode },
+          { sessionId: this.sessionId, statusCode, err: lastDisconnect?.error },
           'WhatsApp session disconnected',
         )
         await this.updateDbStatus('disconnected')

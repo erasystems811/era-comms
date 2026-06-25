@@ -35,7 +35,7 @@ export async function buildServer(supervisor: ISessionSupervisor) {
   await app.register(cors, {
     origin: true,
     methods: ['GET', 'POST', 'PATCH', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Operator-Secret', 'X-Connect-Key', 'X-Connect-Username', 'X-Connect-Secret', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'X-API-Key', 'X-Operator-Secret', 'X-Connect-Key', 'X-Connect-Username', 'X-Connect-Secret', 'Authorization', 'ngrok-skip-browser-warning'],
   })
 
   await app.register(websocketPlugin)

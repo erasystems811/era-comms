@@ -6,7 +6,7 @@ import { logger } from '../shared/logger.js'
 export const db = postgres(config.db.url, {
   max: config.db.maxConnections,
   idle_timeout: 30,
-  connect_timeout: 10,
+  connect_timeout: 30,
   onnotice: (notice) => {
     logger.debug({ notice }, 'PostgreSQL notice')
   },
@@ -24,7 +24,7 @@ export const ADMIN_SENTINEL = '00000000-0000-0000-0000-000000000001'
 export const adminDb = postgres(config.db.url, {
   max: 5,
   idle_timeout: 30,
-  connect_timeout: 10,
+  connect_timeout: 30,
   connection: {
     'app.current_client_id': ADMIN_SENTINEL,
   },
