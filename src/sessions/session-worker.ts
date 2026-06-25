@@ -18,6 +18,7 @@ import { checkWarmup, incrementDailyCount } from '../anti-detection/warmup.js'
 import { varyMessage } from '../anti-detection/variation.js'
 import { updateRiskScore } from '../anti-detection/risk.js'
 import { recordMessageSent } from '../services/plan.js'
+import { logEvent } from '../services/events.js'
 import {
   QUEUE,
   KEY,
@@ -95,6 +96,15 @@ async function start(): Promise<void> {
   session.onMessage(async (msg: InboundMessage) => {
     workerLogger.debug({ from: msg.from, waMessageId: msg.waMessageId }, 'Inbound message')
 
+    void logEvent({
+      eventType: 'message_received',
+      severity:  'info',
+      detail:    `Message received from ${msg.from}`,
+      clientId,
+      sessionId: SESSION_ID,
+      metadata:  { from: msg.from, waMessageId: msg.waMessageId, contentType: msg.contentType },
+    })
+
     await inboundQueue.add('inbound', {
       sessionId: SESSION_ID,
       clientId,
@@ -125,6 +135,14 @@ async function start(): Promise<void> {
   // Apply WhatsApp Business profile once the session connects.
   // Runs automatically on first connect and on every reconnect.
   session.onConnected(async () => {
+    void logEvent({
+      eventType: 'session_connected',
+      severity:  'info',
+      detail:    `Session connected (${phoneNumber})`,
+      clientId,
+      sessionId: SESSION_ID,
+      metadata:  { phoneNumber },
+    })
     type ProfileRow = { profile_name: string | null; profile_description: string | null; profile_picture_url: string | null }
     const profileRows = await q<ProfileRow>(
       adminDb`SELECT profile_name, profile_description, profile_picture_url FROM whatsapp_sessions WHERE id = ${SESSION_ID}`,
@@ -229,6 +247,14 @@ async function start(): Promise<void> {
           'Warmup daily cap reached — message failed',
         )
         await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
+        void logEvent({
+          eventType: 'message_failed',
+          severity:  'warning',
+          detail:    `Message blocked — daily warmup cap reached (${warmup.sentToday}/${warmup.cap})`,
+          clientId,
+          sessionId: SESSION_ID,
+          metadata:  { messageId, to, sentToday: warmup.sentToday, cap: warmup.cap },
+        })
         return // no throw — BullMQ treats this as success; no retry
       }
 
@@ -270,6 +296,15 @@ async function start(): Promise<void> {
         await incrementDailyCount(SESSION_ID)
         await recordMessageSent(clientId)
 
+        void logEvent({
+          eventType: 'message_sent',
+          severity:  'info',
+          detail:    `Message sent to ${to}`,
+          clientId,
+          sessionId: SESSION_ID,
+          metadata:  { messageId, to, waMessageId: result.waMessageId, wasVaried, warmupStage: warmup.stage },
+        })
+
         await adminDb`
           UPDATE messages
           SET wa_message_id    = ${result.waMessageId},
@@ -295,6 +330,14 @@ async function start(): Promise<void> {
       } catch (err) {
         workerLogger.error({ messageId, err }, 'Failed to send message')
         await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
+        void logEvent({
+          eventType: 'message_failed',
+          severity:  'critical',
+          detail:    `Failed to send message to ${to}: ${err instanceof Error ? err.message : String(err)}`,
+          clientId,
+          sessionId: SESSION_ID,
+          metadata:  { messageId, to, error: String(err) },
+        })
         throw err // re-throw so BullMQ applies retry policy
       }
     },
@@ -350,6 +393,25 @@ async function start(): Promise<void> {
           : current === 'connecting' ? 'connecting'
           :                           'disconnected',
       })
+      if (current === 'disconnected') {
+        void logEvent({
+          eventType: 'session_disconnected',
+          severity:  'warning',
+          detail:    `Session disconnected (${phoneNumber}) — will auto-reconnect`,
+          clientId,
+          sessionId: SESSION_ID,
+          metadata:  { phoneNumber },
+        })
+      } else if (current === 'banned') {
+        void logEvent({
+          eventType: 'session_disconnected',
+          severity:  'critical',
+          detail:    `Session logged out by WhatsApp (${phoneNumber})`,
+          clientId,
+          sessionId: SESSION_ID,
+          metadata:  { phoneNumber, reason: 'logged_out' },
+        })
+      }
     }
   }, 5_000)
 
