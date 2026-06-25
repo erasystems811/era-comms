@@ -20,8 +20,7 @@ import { adminDb } from '../db/client.js'
 import { logger } from '../shared/logger.js'
 import { SessionError } from '../shared/errors.js'
 
-// Temporarily verbose for connection debugging
-const baileysLogger = pino({ level: 'debug' })
+const baileysLogger = pino({ level: 'silent' })
 
 // Device fingerprint stored in whatsapp_sessions.device_fingerprint
 // Must be identical on every reconnect for the same session.
