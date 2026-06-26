@@ -10,7 +10,8 @@ import { startAIWorker } from './workers/ai-worker.js'
 import { startAnalyticsWorker } from './workers/analytics-worker.js'
 import { startBroadcastWorker } from './workers/broadcast-worker.js'
 import { startAutomationWorker } from './workers/automation-worker.js'
-import { startEmailCampaignWorker } from './workers/email-campaign-worker.js'
+import { startEmailCampaignWorker }    from './workers/email-campaign-worker.js'
+import { startEmailAutomationWorker } from './workers/email-automation-worker.js'
 import { CallSupervisor } from './voice/call-supervisor.js'
 import { queueDepth } from './observability/metrics.js'
 import { QUEUE } from './queues/definitions.js'
@@ -31,7 +32,8 @@ async function main(): Promise<void> {
   const analyticsWorker = startAnalyticsWorker()
   const broadcastWorker      = startBroadcastWorker()
   const automationWorker     = startAutomationWorker()
-  const emailCampaignWorker  = startEmailCampaignWorker()
+  const emailCampaignWorker    = startEmailCampaignWorker()
+  const emailAutomationWorker  = startEmailAutomationWorker()
 
   // Start voice subsystem — connects to FreeSWITCH ESL
   const callSupervisor = new CallSupervisor()
@@ -84,6 +86,7 @@ async function main(): Promise<void> {
     await analyticsWorker.close()
     await broadcastWorker.close()
     automationWorker.stop()
+    emailAutomationWorker.stop()
     await emailCampaignWorker.close()
     await supervisor.stop()
 

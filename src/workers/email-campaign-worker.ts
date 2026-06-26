@@ -8,13 +8,14 @@
 // server limits. Adjust POSTAL_RATE_LIMIT env var to override.
 
 import { Worker, type Job } from 'bullmq'
-import { adminDb }          from '../db/client.js'
-import { logger }           from '../shared/logger.js'
-import { postalSend }       from '../services/postal.js'
-import { sendEmail }        from '../shared/email.js'
+import { createHmac }      from 'node:crypto'
+import { adminDb }         from '../db/client.js'
+import { logger }          from '../shared/logger.js'
+import { postalSend }      from '../services/postal.js'
+import { sendEmail }       from '../shared/email.js'
 import { maybeCompleteCampaign } from '../services/email-campaigns.js'
-import { QUEUE }            from '../queues/definitions.js'
-import { config }           from '../shared/config.js'
+import { QUEUE }           from '../queues/definitions.js'
+import { config }          from '../shared/config.js'
 
 const log = logger.child({ component: 'email-campaign-worker' })
 
@@ -57,25 +58,45 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
     return
   }
 
-  // Basic personalisation — replace {{first_name}} etc.
+  // Fetch the send row so we can embed its ID in the unsubscribe link
+  const [sendRow] = await adminDb<{ id: string }[]>`
+    SELECT id FROM email_sends WHERE campaign_id = ${campaignId} AND email = ${email} LIMIT 1
+  `
+
+  // Basic personalisation
   const name = firstName ?? (email.split('@')[0] ?? email)
-  const html = row.template_html
+  let html = row.template_html
     .replace(/\{\{first_name\}\}/gi, name)
     .replace(/\{\{email\}\}/gi, email)
 
   const subject = row.subject
     .replace(/\{\{first_name\}\}/gi, name)
 
+  // Inject unsubscribe link + List-Unsubscribe header
+  const unsubUrl = sendRow
+    ? `${config.publicUrl}/v1/email/unsubscribe?sid=${sendRow.id}`
+    : null
+
+  if (unsubUrl) {
+    const unsubBlock = `<div style="text-align:center;padding:24px 0 8px;font-family:sans-serif;font-size:11px;color:#888">
+      <a href="${unsubUrl}" style="color:#888;text-decoration:underline">Unsubscribe</a>
+    </div>`
+    html = html.includes('</body>')
+      ? html.replace('</body>', `${unsubBlock}</body>`)
+      : html + unsubBlock
+  }
+
   // Try Postal first (high-volume, dedicated IP). Fall back to SMTP when Postal isn't set up yet.
   let sent = false
   let postalMessageId: string | null = null
 
   const postalResult = await postalSend({
-    to:       [email],
-    from:     `${row.from_name} <${row.from_email}>`,
+    to:          [email],
+    from:        `${row.from_name} <${row.from_email}>`,
     subject,
-    htmlBody: html,
-    tag:      campaignId,
+    htmlBody:    html,
+    tag:         campaignId,
+    listUnsubscribe: unsubUrl ?? undefined,
   })
 
   if (postalResult) {

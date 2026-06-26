@@ -43,9 +43,11 @@ const schema = z.object({
   SMTP_PASS: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
 
   // Postal — self-hosted email server on your VPS (powers the business email campaign feature)
-  POSTAL_SERVER_URL: z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
-  POSTAL_API_KEY:    z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
-  POSTAL_RATE_LIMIT: z.coerce.number().int().default(50),
+  POSTAL_SERVER_URL:      z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
+  POSTAL_API_KEY:         z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+  POSTAL_RATE_LIMIT:      z.coerce.number().int().default(50),
+  POSTAL_WEBHOOK_SECRET:  z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+  PUBLIC_URL:             z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()).default('https://xeyfmi3l8l5m.share.zrok.io'),
 
   // Voice infrastructure
   SIP_TRUNK_HOST: z.string().optional(),
@@ -113,10 +115,13 @@ export const config = Object.freeze({
     smtpPort:        env.SMTP_PORT,
     smtpUser:        env.SMTP_USER,
     smtpPass:        env.SMTP_PASS,
-    postalServerUrl: env.POSTAL_SERVER_URL,
-    postalApiKey:    env.POSTAL_API_KEY,
-    postalRateLimit: env.POSTAL_RATE_LIMIT,
+    postalServerUrl:     env.POSTAL_SERVER_URL,
+    postalApiKey:        env.POSTAL_API_KEY,
+    postalRateLimit:     env.POSTAL_RATE_LIMIT,
+    postalWebhookSecret: env.POSTAL_WEBHOOK_SECRET,
   },
+
+  publicUrl: env.PUBLIC_URL ?? 'https://xeyfmi3l8l5m.share.zrok.io',
 
   monitoring: {
     alertWhatsappNumber: env.ALERT_WHATSAPP_NUMBER,

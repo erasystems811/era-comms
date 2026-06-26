@@ -1,13 +1,16 @@
 // ── EMAIL MODULE ADMIN ROUTES ─────────────────────────────────
 //
-// All routes require X-Operator-Secret except the Postal webhook receiver.
+// All routes require X-Operator-Secret except the Postal webhook receiver
+// and the public unsubscribe endpoint.
 // Prefix: /v1/admin/email (registered in server.ts)
 
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
+import { createHmac }       from 'node:crypto'
 import { adminDb }          from '../../db/client.js'
 import { config }           from '../../shared/config.js'
 import { launchCampaign, handlePostalEvent } from '../../services/email-campaigns.js'
-import { postalPing, postalDnsRecords }       from '../../services/postal.js'
+import { postalPing, postalDnsRecords }     from '../../services/postal.js'
+import { randomBytes }      from 'node:crypto'
 
 // ── Auth guard ─────────────────────────────────────────────────
 
@@ -139,13 +142,82 @@ const emailRoutes: FastifyPluginAsync = async (app) => {
     reply.send(postalDnsRecords(row.domain, row.dkim_public_key))
   })
 
+  // PATCH /domains/:id — update DKIM public key
+  app.patch('/domains/:id', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { id }            = req.params as { id: string }
+    const { dkimPublicKey } = req.body as { dkimPublicKey?: string }
+
+    const [row] = await adminDb<DomainRow[]>`
+      UPDATE email_domains
+      SET dkim_public_key = ${dkimPublicKey ?? null}, updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING *, (SELECT name FROM clients WHERE id = client_id) AS client_name
+    `
+    if (!row) return reply.status(404).send({ error: 'Domain not found' })
+    reply.send(mapDomain(row))
+  })
+
+  // POST /domains/:id/verify — try Postal API; fall back to manual flag update
   app.post('/domains/:id/verify', async (req, reply) => {
     if (!assertOp(req, reply)) return
     const { id } = req.params as { id: string }
 
-    // In production, this would query Postal's domain verification endpoint.
-    // For now it's a stub — Postal auto-detects DNS changes on a schedule.
-    reply.send({ queued: true, message: 'Verification check queued. Results update within 5 minutes.' })
+    const [domainRow] = await adminDb<{ domain: string; dkim_public_key: string | null }[]>`
+      SELECT domain, dkim_public_key FROM email_domains WHERE id = ${id}
+    `
+    if (!domainRow) return reply.status(404).send({ error: 'Domain not found' })
+
+    // Attempt real Postal verification if configured
+    if (config.email.postalApiKey && config.email.postalServerUrl) {
+      try {
+        const res = await fetch(`${config.email.postalServerUrl}/api/v1/domains/check`, {
+          method: 'POST',
+          headers: {
+            'X-Server-API-Key': config.email.postalApiKey,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ name: domainRow.domain }),
+        })
+        if (res.ok) {
+          const data = await res.json() as {
+            data?: { spf?: { valid: boolean }; dkim?: { valid: boolean }; mx?: { valid: boolean } }
+          }
+          const d = data.data
+          await adminDb`
+            UPDATE email_domains
+            SET spf_verified   = ${d?.spf?.valid  ?? false},
+                dkim_verified  = ${d?.dkim?.valid ?? false},
+                mx_verified    = ${d?.mx?.valid   ?? false},
+                dmarc_verified = FALSE,
+                verified_at    = CASE WHEN ${d?.spf?.valid ?? false} AND ${d?.dkim?.valid ?? false} THEN NOW() ELSE verified_at END,
+                updated_at     = NOW()
+            WHERE id = ${id}
+          `
+          return reply.send({ checked: true, spf: d?.spf?.valid, dkim: d?.dkim?.valid, mx: d?.mx?.valid })
+        }
+      } catch { /* fall through to manual notice */ }
+    }
+
+    reply.send({ queued: true, message: 'Add the DNS records at your registrar, then click Verify again. Postal checks automatically every few minutes.' })
+  })
+
+  // POST /domains/:id/mark-verified — operator manually confirms domain is set up
+  app.post('/domains/:id/mark-verified', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { id } = req.params as { id: string }
+
+    await adminDb`
+      UPDATE email_domains
+      SET spf_verified   = TRUE,
+          dkim_verified  = TRUE,
+          dmarc_verified = TRUE,
+          mx_verified    = TRUE,
+          verified_at    = NOW(),
+          updated_at     = NOW()
+      WHERE id = ${id}
+    `
+    reply.send({ verified: true })
   })
 
   app.delete('/domains/:id', async (req, reply) => {
@@ -436,19 +508,159 @@ const emailRoutes: FastifyPluginAsync = async (app) => {
   })
 
   // ── POSTAL WEBHOOK ────────────────────────────────────────
-  // No operator auth — Postal POSTs here. Authenticated via Postal's
-  // webhook signing key (validated in production; stubbed for now).
+  // No operator auth — Postal POSTs here. Validates X-Postal-Signature
+  // when POSTAL_WEBHOOK_SECRET is configured.
 
-  app.post('/webhooks/postal', async (req, reply) => {
+  app.post('/webhooks/postal', { config: { rawBody: true } }, async (req, reply) => {
+    const secret = config.email.postalWebhookSecret
+    if (secret) {
+      const sig = req.headers['x-postal-signature'] as string | undefined
+      const body = (req as unknown as { rawBody?: Buffer }).rawBody ?? Buffer.from(JSON.stringify(req.body))
+      const expected = createHmac('sha256', secret).update(body).digest('base64')
+      if (!sig || sig !== expected) {
+        app.log.warn('Postal webhook signature mismatch')
+        return reply.status(401).send({ error: 'INVALID_SIGNATURE' })
+      }
+    }
     try {
       await handlePostalEvent(req.body as Parameters<typeof handlePostalEvent>[0])
       reply.status(200).send({ ok: true })
     } catch (err) {
       app.log.error({ err }, 'Postal webhook error')
-      reply.status(200).send({ ok: false }) // Always 200 to stop Postal retries on our errors
+      reply.status(200).send({ ok: false })
     }
   })
+
+  // ── EMAIL AUTOMATION FLOWS ────────────────────────────────
+
+  type FlowRow = {
+    id: string; client_id: string; client_name: string; name: string
+    trigger_key: string | null; status: string
+    total_enrolled: number; total_completed: number
+    created_at: string; updated_at: string
+  }
+
+  app.get('/automations', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { clientId } = req.query as { clientId?: string }
+
+    const rows = await adminDb<FlowRow[]>`
+      SELECT f.*, c.name AS client_name
+      FROM email_automation_flows f
+      JOIN clients c ON c.id = f.client_id
+      WHERE (${clientId ?? null}::uuid IS NULL OR f.client_id = ${clientId ?? null})
+        AND f.status != 'archived'
+      ORDER BY f.created_at DESC
+    `
+    reply.send(rows.map(mapFlow))
+  })
+
+  app.post('/automations', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { clientId, name, steps } = req.body as {
+      clientId: string
+      name: string
+      steps: { stepType: 'send_email' | 'wait'; templateId?: string; domainId?: string; fromName?: string; fromEmail?: string; delayMinutes?: number }[]
+    }
+    if (!clientId || !name) return reply.status(400).send({ error: 'clientId and name required' })
+
+    const triggerKey = randomBytes(16).toString('hex')
+
+    const [flow] = await adminDb<FlowRow[]>`
+      INSERT INTO email_automation_flows (client_id, name, trigger_key)
+      VALUES (${clientId}, ${name}, ${triggerKey})
+      RETURNING *, (SELECT name FROM clients WHERE id = client_id) AS client_name
+    `
+
+    if (steps?.length) {
+      for (let i = 0; i < steps.length; i++) {
+        const s = steps[i]!
+        await adminDb`
+          INSERT INTO email_automation_steps
+            (flow_id, step_index, step_type, template_id, domain_id, from_name, from_email, delay_minutes)
+          VALUES
+            (${flow!.id}, ${i}, ${s.stepType},
+             ${s.templateId ?? null}, ${s.domainId ?? null},
+             ${s.fromName ?? null}, ${s.fromEmail ?? null},
+             ${s.delayMinutes ?? 0})
+        `
+      }
+    }
+
+    reply.status(201).send(mapFlow(flow!))
+  })
+
+  app.get('/automations/:id', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { id } = req.params as { id: string }
+
+    const [flow] = await adminDb<FlowRow[]>`
+      SELECT f.*, c.name AS client_name FROM email_automation_flows f
+      JOIN clients c ON c.id = f.client_id WHERE f.id = ${id}
+    `
+    if (!flow) return reply.status(404).send({ error: 'Flow not found' })
+
+    const steps = await adminDb`
+      SELECT * FROM email_automation_steps WHERE flow_id = ${id} ORDER BY step_index
+    `
+    const enrollments = await adminDb<{ status: string; count: string }[]>`
+      SELECT status, COUNT(*)::text AS count
+      FROM email_automation_enrollments WHERE flow_id = ${id} GROUP BY status
+    `
+    reply.send({ ...mapFlow(flow), steps, enrollments })
+  })
+
+  app.delete('/automations/:id', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { id } = req.params as { id: string }
+    await adminDb`UPDATE email_automation_flows SET status = 'archived', updated_at = NOW() WHERE id = ${id}`
+    reply.status(204).send()
+  })
+
+  // POST /automations/:id/enroll — bulk enroll contacts
+  app.post('/automations/:id/enroll', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { id } = req.params as { id: string }
+
+    const [flow] = await adminDb<{ client_id: string }[]>`SELECT client_id FROM email_automation_flows WHERE id = ${id}`
+    if (!flow) return reply.status(404).send({ error: 'Flow not found' })
+
+    const contacts = (req.body as { email: string; firstName?: string; lastName?: string }[])
+    if (!Array.isArray(contacts) || contacts.length === 0)
+      return reply.status(400).send({ error: 'Provide array of { email, firstName?, lastName? }' })
+
+    let enrolled = 0
+    for (const c of contacts) {
+      if (!c.email?.includes('@')) continue
+      const existing = await adminDb`
+        SELECT 1 FROM email_automation_enrollments WHERE flow_id = ${id} AND email = ${c.email.toLowerCase()}
+      `
+      if (existing.length > 0) continue
+      await adminDb`
+        INSERT INTO email_automation_enrollments (flow_id, client_id, email, first_name, last_name)
+        VALUES (${id}, ${flow.client_id}, ${c.email.toLowerCase()}, ${c.firstName ?? null}, ${c.lastName ?? null})
+      `
+      enrolled++
+    }
+
+    await adminDb`
+      UPDATE email_automation_flows SET total_enrolled = total_enrolled + ${enrolled}, updated_at = NOW() WHERE id = ${id}
+    `
+    reply.send({ enrolled })
+  })
+
+  app.get('/automations/:id/enrollments', async (req, reply) => {
+    if (!assertOp(req, reply)) return
+    const { id } = req.params as { id: string }
+    const rows = await adminDb`
+      SELECT * FROM email_automation_enrollments WHERE flow_id = ${id} ORDER BY created_at DESC LIMIT 200
+    `
+    reply.send(rows)
+  })
+
 }
+
+// ── Mappers ────────────────────────────────────────────────────
 
 // ── Mappers ────────────────────────────────────────────────────
 
@@ -516,7 +728,22 @@ function calcRate(a: number | string | undefined, b: number | string | undefined
   const an = Number(a ?? 0)
   const bn = Number(b ?? 0)
   if (!bn) return 0
-  return Math.round((an / bn) * 10000) / 100  // 2 decimal places
+  return Math.round((an / bn) * 10000) / 100
+}
+
+function mapFlow(r: { id: string; client_id: string; client_name: string; name: string; trigger_key: string | null; status: string; total_enrolled: number; total_completed: number; created_at: string; updated_at: string }) {
+  return {
+    id:             r.id,
+    clientId:       r.client_id,
+    clientName:     r.client_name,
+    name:           r.name,
+    triggerKey:     r.trigger_key,
+    status:         r.status,
+    totalEnrolled:  Number(r.total_enrolled),
+    totalCompleted: Number(r.total_completed),
+    createdAt:      r.created_at,
+    updatedAt:      r.updated_at,
+  }
 }
 
 export default emailRoutes

@@ -103,6 +103,69 @@ export async function buildServer(supervisor: ISessionSupervisor) {
   // Email module — operator routes + Postal webhook receiver
   await app.register(emailRoutes, { prefix: '/v1/admin/email' })
 
+  // Email public routes — unsubscribe (no auth)
+  await app.get('/v1/email/unsubscribe', async (req, reply) => {
+    const { adminDb: db } = await import('../db/client.js')
+    const { sid, eid }    = req.query as { sid?: string; eid?: string }
+
+    if (sid) {
+      const [send] = await db<{ email: string; client_id: string }[]>`
+        SELECT email, client_id FROM email_sends WHERE id = ${sid} LIMIT 1
+      `
+      if (send) {
+        await db`INSERT INTO email_suppressions (email, reason, client_id) VALUES (${send.email}, 'unsubscribe', ${send.client_id}) ON CONFLICT DO NOTHING`
+        await db`UPDATE email_sends SET unsubscribed_at = NOW() WHERE id = ${sid}`
+      }
+    }
+
+    if (eid) {
+      const [enrollment] = await db<{ email: string; client_id: string }[]>`
+        SELECT email, client_id FROM email_automation_enrollments WHERE id = ${eid} LIMIT 1
+      `
+      if (enrollment) {
+        await db`INSERT INTO email_suppressions (email, reason, client_id) VALUES (${enrollment.email}, 'unsubscribe', ${enrollment.client_id}) ON CONFLICT DO NOTHING`
+        await db`UPDATE email_automation_enrollments SET status = 'unsubscribed', updated_at = NOW() WHERE id = ${eid}`
+      }
+    }
+
+    reply.type('text/html').send(`<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Unsubscribed</title>
+<style>body{font-family:sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#0f172a;color:#e2e8f0}.card{max-width:360px;text-align:center;padding:40px 32px}h1{font-size:20px;margin:0 0 8px;color:#f8fafc}p{font-size:14px;color:#94a3b8;margin:0;line-height:1.6}</style>
+</head><body><div class="card"><div style="font-size:48px;margin-bottom:16px">✓</div>
+<h1>You've been unsubscribed</h1><p>You'll no longer receive these emails. If this was a mistake, please contact the sender directly.</p>
+</div></body></html>`)
+  })
+
+  // Email automation public trigger (key in URL, no operator auth)
+  await app.post('/v1/public/email-trigger/:key', async (req, reply) => {
+    const { adminDb: db } = await import('../db/client.js')
+    const { key }         = req.params as { key: string }
+    const { email, firstName, lastName } = req.body as { email?: string; firstName?: string; lastName?: string }
+
+    if (!email?.includes('@')) return reply.status(400).send({ error: 'Valid email required' })
+
+    const [flow] = await db<{ id: string; client_id: string; status: string }[]>`
+      SELECT id, client_id, status FROM email_automation_flows WHERE trigger_key = ${key}
+    `
+    if (!flow || flow.status !== 'active') return reply.status(404).send({ error: 'Trigger not found' })
+
+    const existing = await db<{ status: string }[]>`
+      SELECT status FROM email_automation_enrollments WHERE flow_id = ${flow.id} AND email = ${email.toLowerCase()}
+    `
+    if (existing[0]?.status === 'active') return reply.send({ enrolled: false, reason: 'already_active' })
+
+    await db`
+      INSERT INTO email_automation_enrollments (flow_id, client_id, email, first_name, last_name)
+      VALUES (${flow.id}, ${flow.client_id}, ${email.toLowerCase()}, ${firstName ?? null}, ${lastName ?? null})
+      ON CONFLICT (flow_id, email)
+      DO UPDATE SET status = 'active', current_step = 0, next_step_at = NOW(),
+                    first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, updated_at = NOW()
+    `
+    await db`UPDATE email_automation_flows SET total_enrolled = total_enrolled + 1, updated_at = NOW() WHERE id = ${flow.id}`
+    return reply.send({ enrolled: true })
+  })
+
   // Broadcasts — WhatsApp bulk send campaigns
   await app.register(broadcastRoutes, { prefix: '/v1/admin/broadcasts' })
 

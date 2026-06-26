@@ -22,6 +22,7 @@ export interface PostalSendOptions {
   htmlBody: string
   textBody?: string
   tag?: string        // campaign ID for grouping in Postal UI
+  listUnsubscribe?: string  // URL for List-Unsubscribe header
 }
 
 export interface PostalDomainRecord {
@@ -58,15 +59,18 @@ export async function postalSend(opts: PostalSendOptions): Promise<PostalSendRes
       method: 'POST',
       headers: postalHeaders(),
       body: JSON.stringify({
-        to:        opts.to,
-        from:      opts.from,
-        reply_to:  opts.replyTo,
-        subject:   opts.subject,
-        html_body: opts.htmlBody,
-        plain_body: opts.textBody,
-        tag:        opts.tag,
+        to:           opts.to,
+        from:         opts.from,
+        reply_to:     opts.replyTo,
+        subject:      opts.subject,
+        html_body:    opts.htmlBody,
+        plain_body:   opts.textBody,
+        tag:          opts.tag,
         track_clicks: true,
-        track_opens:  false, // pixel tracking disabled — click-first principle
+        track_opens:  false,
+        list_unsubscribe: opts.listUnsubscribe
+          ? `<${opts.listUnsubscribe}>`
+          : undefined,
       }),
     })
 
