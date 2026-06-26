@@ -233,16 +233,11 @@ async function start(): Promise<void> {
 
       workerLogger.debug({ messageId, to }, 'Processing outbound message')
 
-      // ── 0. WAIT FOR CONNECTION ──────────────────────────────
-      // The worker starts immediately on launch, but WhatsApp may still
-      // be handshaking. Wait up to 30 s before giving up.
+      // ── 0. CONNECTION CHECK ─────────────────────────────────
+      // If not connected, fail immediately so BullMQ retries with backoff.
+      // Do not block the worker thread waiting — other sessions need it.
       if (session.getStatus() !== 'connected') {
-        await new Promise<void>((resolve, reject) => {
-          const deadline = setTimeout(() => reject(new Error('Timed out waiting for session to connect')), 30_000)
-          const check = setInterval(() => {
-            if (session.getStatus() === 'connected') { clearTimeout(deadline); clearInterval(check); resolve() }
-          }, 500)
-        })
+        throw new Error(`Session not connected (status: ${session.getStatus()}) — will retry`)
       }
 
       // ── 1. WARMUP CAP CHECK ─────────────────────────────────

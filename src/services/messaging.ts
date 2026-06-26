@@ -186,6 +186,9 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
     if (sess.status === 'banned') {
       throw new SessionError('Session is permanently banned — replace the number')
     }
+    if (sess.status !== 'active') {
+      throw new SessionError(`Session is not connected (status: ${sess.status}) — reconnect it first`)
+    }
 
     // Find or create contact (upsert on unique(client_id, phone_number))
     const contactRows = (await tx`
@@ -269,7 +272,12 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
         conversationId: result.conversationId,
         aiGenerated,
       },
-      { removeOnComplete: true, removeOnFail: 100 },
+      {
+        removeOnComplete: true,
+        removeOnFail: 100,
+        attempts: 15,
+        backoff: { type: 'fixed', delay: 30_000 },  // retry every 30s for up to 7.5 min
+      },
     )
   }
 

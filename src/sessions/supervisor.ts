@@ -58,6 +58,14 @@ export class SessionSupervisor implements ISessionSupervisor {
       HEARTBEAT_CHECK_INTERVAL_MS,
     )
 
+    // On startup, clear stale 'active' status — any session that was marked
+    // active from a previous run is not actually connected yet.
+    await adminDb`
+      UPDATE whatsapp_sessions
+      SET status = 'disconnected', updated_at = NOW()
+      WHERE status = 'active'
+    `
+
     // Load all non-banned sessions from the database and start them
     const sessions = await adminDb<Array<{ id: string; status: string }>>`
       SELECT id, status FROM whatsapp_sessions
