@@ -757,8 +757,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       sessionId = rows[0]!.id
 
       await adminDb`
-        INSERT INTO warmup_profiles (session_id, client_id)
-        VALUES (${sessionId}, ${body.clientId})
+        INSERT INTO warmup_profiles (session_id, client_id, skip_warmup)
+        VALUES (${sessionId}, ${body.clientId}, true)
       `
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code

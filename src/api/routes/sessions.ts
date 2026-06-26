@@ -62,8 +62,8 @@ const sessionsRoutes: FastifyPluginAsync = async (app) => {
         // Create default warmup profile atomically with the session.
         // Default volume_curve and content_stages come from column defaults.
         await tx`
-          INSERT INTO warmup_profiles (session_id, client_id)
-          VALUES (${sessionId}, ${req.clientId})
+          INSERT INTO warmup_profiles (session_id, client_id, skip_warmup)
+          VALUES (${sessionId}, ${req.clientId}, true)
         `
 
         return inserted

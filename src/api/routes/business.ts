@@ -1241,7 +1241,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
       sessionId = rows[0]!.id
 
       await adminDb`
-        INSERT INTO warmup_profiles (session_id) VALUES (${sessionId})
+        INSERT INTO warmup_profiles (session_id, skip_warmup) VALUES (${sessionId}, true)
         ON CONFLICT DO NOTHING
       `
     }
