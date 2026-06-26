@@ -230,6 +230,7 @@ async function start(): Promise<void> {
       const content:      string  = job.data.content
       const contentType:  string  = job.data.contentType
       const aiGenerated:  boolean = job.data.aiGenerated
+      const skipJitter:   boolean = job.data.skipJitter ?? false
 
       workerLogger.debug({ messageId, to }, 'Processing outbound message')
 
@@ -254,14 +255,14 @@ async function start(): Promise<void> {
           'Warmup daily cap reached — message failed',
         )
         await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
-        void logEvent({
+        logEvent({
           eventType: 'message_failed',
           severity:  'warning',
           detail:    `Message blocked — daily warmup cap reached (${warmup.sentToday}/${warmup.cap})`,
           clientId,
           sessionId: SESSION_ID,
           metadata:  { messageId, to, sentToday: warmup.sentToday, cap: warmup.cap },
-        })
+        }).catch((err: unknown) => workerLogger.error({ err }, 'message_failed event write failed'))
         return // no throw — BullMQ treats this as success; no retry
       }
 
@@ -284,15 +285,15 @@ async function start(): Promise<void> {
       // Show a "typing…" indicator for a human-realistic duration,
       // then pause before actually sending.
 
-      const jitter = calculateJitter(warmup.stage, finalContent.length)
-
-      try {
-        await session.sendComposing(to, jitter.composingMs)
-      } catch {
-        // Composing is best-effort — proceed without it
+      if (!skipJitter) {
+        const jitter = calculateJitter(warmup.stage, finalContent.length)
+        try {
+          await session.sendComposing(to, jitter.composingMs)
+        } catch {
+          // Composing is best-effort — proceed without it
+        }
+        await delay(jitter.delayMs)
       }
-
-      await delay(jitter.delayMs)
 
       // ── 4. SEND ─────────────────────────────────────────────
 
@@ -337,14 +338,14 @@ async function start(): Promise<void> {
       } catch (err) {
         workerLogger.error({ messageId, err }, 'Failed to send message')
         await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
-        void logEvent({
+        logEvent({
           eventType: 'message_failed',
           severity:  'critical',
           detail:    `Failed to send message to ${to}: ${err instanceof Error ? err.message : String(err)}`,
           clientId,
           sessionId: SESSION_ID,
           metadata:  { messageId, to, error: String(err) },
-        })
+        }).catch((e: unknown) => workerLogger.error({ e }, 'message_failed event write failed'))
         throw err // re-throw so BullMQ applies retry policy
       }
     },

@@ -122,6 +122,7 @@ export interface SendMessageOptions {
   conversationId?: string  // Pin to existing conversation, or find/create
   idempotencyKey?: string  // Client-supplied. Auto-generated if omitted.
   aiGenerated?: boolean    // true for AI-authored replies — skips variation in worker
+  skipJitter?: boolean     // true for operator test sends — skip composing/delay
 }
 
 export interface SendMessageResult {
@@ -141,6 +142,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
     conversationId: requestedConvId,
     idempotencyKey,
     aiGenerated  = false,
+    skipJitter   = false,
   } = opts
 
   const ikey = idempotencyKey ?? randomUUID()
@@ -185,9 +187,6 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
     if (!sess) throw new NotFoundError('Session')
     if (sess.status === 'banned') {
       throw new SessionError('Session is permanently banned — replace the number')
-    }
-    if (sess.status !== 'active') {
-      throw new SessionError(`Session is not connected (status: ${sess.status}) — reconnect it first`)
     }
 
     // Find or create contact (upsert on unique(client_id, phone_number))
@@ -271,6 +270,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
         contentType,
         conversationId: result.conversationId,
         aiGenerated,
+        skipJitter,
       },
       {
         removeOnComplete: true,

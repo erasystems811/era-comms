@@ -956,9 +956,16 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!content?.trim())
       return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'content is required' })
 
-    type SessionRow = { client_id: string }
-    const rows = (await adminDb`SELECT client_id FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as SessionRow[]
+    type SessionRow = { client_id: string; status: string }
+    const rows = (await adminDb`SELECT client_id, status FROM whatsapp_sessions WHERE id = ${sessionId}`) as unknown as SessionRow[]
     if (!rows[0]) throw new NotFoundError('Session')
+
+    if (rows[0].status !== 'active') {
+      return reply.status(409).send({
+        error: 'SESSION_NOT_CONNECTED',
+        message: `Session is not connected (status: ${rows[0].status}) — reconnect it first`,
+      })
+    }
 
     const result = await sendMessage({
       clientId:    rows[0].client_id,
@@ -966,6 +973,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       to,
       content,
       contentType: 'text',
+      skipJitter:  true,
     })
 
     return reply.send({ ok: true, messageId: result.messageId })

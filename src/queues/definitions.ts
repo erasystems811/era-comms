@@ -52,6 +52,7 @@ export interface OutboundMessageJob {
   // Anti-detection — worker resolves warmup stage from DB at process time;
   // aiGenerated skips variation (model output is already diverse).
   aiGenerated: boolean
+  skipJitter?: boolean  // true for operator test messages — skip composing/delay so result is instant
 }
 
 export interface InboundMessageJob {
