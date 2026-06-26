@@ -210,9 +210,14 @@ async function start(): Promise<void> {
 
   // ── HEARTBEAT ─────────────────────────────────────────────────
 
-  const heartbeat = setInterval(async () => {
-    await generalRedis.setex(KEY.sessionHeartbeat(SESSION_ID), HEARTBEAT_TTL_SECONDS, '1')
-    await adminDb`UPDATE whatsapp_sessions SET last_heartbeat_at = NOW() WHERE id = ${SESSION_ID}`
+  const heartbeat = setInterval(() => {
+    // Both ops are best-effort — a network blip must never crash the worker.
+    // Errors are logged but swallowed so the process stays alive.
+    generalRedis
+      .setex(KEY.sessionHeartbeat(SESSION_ID), HEARTBEAT_TTL_SECONDS, '1')
+      .catch((err: unknown) => workerLogger.warn({ err }, 'Heartbeat Redis write failed'))
+    adminDb`UPDATE whatsapp_sessions SET last_heartbeat_at = NOW() WHERE id = ${SESSION_ID}`
+      .catch((err: unknown) => workerLogger.warn({ err }, 'Heartbeat DB write failed'))
   }, HEARTBEAT_INTERVAL_MS)
 
   await generalRedis.setex(KEY.sessionHeartbeat(SESSION_ID), HEARTBEAT_TTL_SECONDS, '1')
@@ -390,36 +395,35 @@ async function start(): Promise<void> {
   // ── STATUS POLLING ────────────────────────────────────────────
 
   let lastPublishedStatus = session.getStatus()
-  const statusPoll = setInterval(async () => {
+  const statusPoll = setInterval(() => {
     const current = session.getStatus()
-    if (current !== lastPublishedStatus) {
-      lastPublishedStatus = current
-      await publishStatus({
-        status:
-          current === 'connected'    ? 'connected'
-          : current === 'banned'     ? 'banned'
-          : current === 'connecting' ? 'connecting'
-          :                           'disconnected',
-      })
-      if (current === 'disconnected') {
-        logEvent({
-          eventType: 'session_disconnected',
-          severity:  'warning',
-          detail:    `Session disconnected (${phoneNumber}) — will auto-reconnect`,
-          clientId,
-          sessionId: SESSION_ID,
-          metadata:  { phoneNumber },
-        }).catch((err: unknown) => workerLogger.error({ err }, 'session_disconnected event write failed'))
-      } else if (current === 'banned') {
-        logEvent({
-          eventType: 'session_disconnected',
-          severity:  'critical',
-          detail:    `Session logged out by WhatsApp (${phoneNumber})`,
-          clientId,
-          sessionId: SESSION_ID,
-          metadata:  { phoneNumber, reason: 'logged_out' },
-        }).catch((err: unknown) => workerLogger.error({ err }, 'session_disconnected event write failed'))
-      }
+    if (current === lastPublishedStatus) return
+    lastPublishedStatus = current
+    publishStatus({
+      status:
+        current === 'connected'    ? 'connected'
+        : current === 'banned'     ? 'banned'
+        : current === 'connecting' ? 'connecting'
+        :                           'disconnected',
+    }).catch((err: unknown) => workerLogger.warn({ err }, 'Status publish failed'))
+    if (current === 'disconnected') {
+      logEvent({
+        eventType: 'session_disconnected',
+        severity:  'warning',
+        detail:    `Session disconnected (${phoneNumber}) — will auto-reconnect`,
+        clientId,
+        sessionId: SESSION_ID,
+        metadata:  { phoneNumber },
+      }).catch((err: unknown) => workerLogger.error({ err }, 'session_disconnected event write failed'))
+    } else if (current === 'banned') {
+      logEvent({
+        eventType: 'session_disconnected',
+        severity:  'critical',
+        detail:    `Session logged out by WhatsApp (${phoneNumber})`,
+        clientId,
+        sessionId: SESSION_ID,
+        metadata:  { phoneNumber, reason: 'logged_out' },
+      }).catch((err: unknown) => workerLogger.error({ err }, 'session_disconnected event write failed'))
     }
   }, 5_000)
 
