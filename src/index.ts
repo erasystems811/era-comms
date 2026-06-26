@@ -8,6 +8,8 @@ import { startInboundWorker } from './workers/inbound-worker.js'
 import { startWebhookWorker } from './workers/webhook-worker.js'
 import { startAIWorker } from './workers/ai-worker.js'
 import { startAnalyticsWorker } from './workers/analytics-worker.js'
+import { startBroadcastWorker } from './workers/broadcast-worker.js'
+import { startAutomationWorker } from './workers/automation-worker.js'
 import { CallSupervisor } from './voice/call-supervisor.js'
 import { queueDepth } from './observability/metrics.js'
 import { QUEUE } from './queues/definitions.js'
@@ -25,6 +27,8 @@ async function main(): Promise<void> {
   const webhookWorker   = startWebhookWorker()
   const aiWorker        = startAIWorker()
   const analyticsWorker = startAnalyticsWorker()
+  const broadcastWorker = startBroadcastWorker()
+  const automationWorker = startAutomationWorker()
 
   // Start voice subsystem — connects to FreeSWITCH ESL
   const callSupervisor = new CallSupervisor()
@@ -70,6 +74,8 @@ async function main(): Promise<void> {
     await webhookWorker.close()
     await aiWorker.close()
     await analyticsWorker.close()
+    await broadcastWorker.close()
+    automationWorker.stop()
     await supervisor.stop()
 
     logger.info('ERA Comms stopped')

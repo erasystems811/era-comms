@@ -1355,6 +1355,385 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(204).send()
   })
 
+  // ── AI REPLY PROFILE per client ─────────────────────────────
+
+  app.get('/clients/:clientId/ai-profile', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { clientId } = req.params as { clientId: string }
+
+    type PRow = {
+      id: string; persona: string; tone: string; system_prompt: string
+      permitted_topics: string[]; prohibited_topics: string[]
+      escalation_triggers: string[]; max_tokens: number; temperature: number
+      ai_reply: boolean
+    }
+
+    const profiles = (await adminDb`
+      SELECT p.*, COALESCE(m.ai_reply, FALSE) AS ai_reply
+      FROM   ai_reply_profiles p
+      LEFT JOIN module_config m ON m.client_id = p.client_id
+      WHERE  p.client_id = ${clientId}
+    `) as unknown as PRow[]
+
+    if (!profiles[0]) {
+      // Return defaults so the UI can pre-fill
+      return reply.send({
+        exists: false, aiReply: false,
+        persona: 'a helpful business assistant',
+        tone: 'friendly and professional',
+        systemPrompt: "You are a helpful business assistant. Be concise and professional. Only answer questions related to this business. If you don't know something, offer to connect the customer with a human.",
+        permittedTopics: [], prohibitedTopics: [],
+        escalationTriggers: ['human', 'agent', 'speak to someone', 'call me', 'complaint', 'refund'],
+        maxTokens: 500, temperature: 0.7,
+      })
+    }
+
+    const p = profiles[0]!
+    return reply.send({
+      exists: true, aiReply: p.ai_reply,
+      persona: p.persona, tone: p.tone, systemPrompt: p.system_prompt,
+      permittedTopics: p.permitted_topics, prohibitedTopics: p.prohibited_topics,
+      escalationTriggers: p.escalation_triggers,
+      maxTokens: p.max_tokens, temperature: Number(p.temperature),
+    })
+  })
+
+  app.put('/clients/:clientId/ai-profile', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { clientId } = req.params as { clientId: string }
+
+    const b = req.body as {
+      aiReply?: boolean; persona?: string; tone?: string; systemPrompt?: string
+      permittedTopics?: string[]; prohibitedTopics?: string[]
+      escalationTriggers?: string[]; maxTokens?: number; temperature?: number
+    }
+
+    // Upsert profile
+    await adminDb`
+      INSERT INTO ai_reply_profiles (
+        client_id, persona, tone, system_prompt,
+        permitted_topics, prohibited_topics, escalation_triggers,
+        max_tokens, temperature
+      ) VALUES (
+        ${clientId},
+        ${b.persona ?? 'a helpful business assistant'},
+        ${b.tone ?? 'friendly and professional'},
+        ${b.systemPrompt ?? ''},
+        ${b.permittedTopics ?? []},
+        ${b.prohibitedTopics ?? []},
+        ${b.escalationTriggers ?? []},
+        ${b.maxTokens ?? 500},
+        ${b.temperature ?? 0.7}
+      )
+      ON CONFLICT (client_id) DO UPDATE SET
+        persona             = EXCLUDED.persona,
+        tone                = EXCLUDED.tone,
+        system_prompt       = EXCLUDED.system_prompt,
+        permitted_topics    = EXCLUDED.permitted_topics,
+        prohibited_topics   = EXCLUDED.prohibited_topics,
+        escalation_triggers = EXCLUDED.escalation_triggers,
+        max_tokens          = EXCLUDED.max_tokens,
+        temperature         = EXCLUDED.temperature,
+        updated_at          = NOW()
+    `
+
+    // Update ai_reply toggle in module_config
+    if (b.aiReply !== undefined) {
+      await adminDb`
+        INSERT INTO module_config (client_id, ai_reply)
+        VALUES (${clientId}, ${b.aiReply})
+        ON CONFLICT (client_id) DO UPDATE SET ai_reply = ${b.aiReply}, updated_at = NOW()
+      `
+      // When AI reply is enabled, update all active conversations for this client
+      if (b.aiReply) {
+        await adminDb`
+          UPDATE conversations SET ai_active = TRUE
+          WHERE client_id = ${clientId} AND status = 'active'
+        `
+      } else {
+        await adminDb`
+          UPDATE conversations SET ai_active = FALSE
+          WHERE client_id = ${clientId}
+        `
+      }
+    }
+
+    return reply.status(204).send()
+  })
+
+  // ── MODERATION RULES ─────────────────────────────────────────
+
+  app.get('/moderation/rules', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    type RRow = { id: string; keyword: string; action: string; severity: string; created_at: string }
+    const rows = (await adminDb`SELECT id, keyword, action, severity, created_at FROM moderation_rules ORDER BY created_at DESC`) as unknown as RRow[]
+    return reply.send(rows.map(r => ({ id: r.id, keyword: r.keyword, action: r.action, severity: r.severity, createdAt: r.created_at })))
+  })
+
+  app.post('/moderation/rules', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { keyword, action, severity } = req.body as { keyword?: string; action?: string; severity?: string }
+    if (!keyword?.trim()) return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'keyword is required' })
+    type RIRow = { id: string; created_at: string }
+    const rows = (await adminDb`
+      INSERT INTO moderation_rules (keyword, action, severity)
+      VALUES (${keyword.trim().toLowerCase()}, ${action ?? 'flag'}, ${severity ?? 'warning'})
+      ON CONFLICT (keyword) DO UPDATE SET action = EXCLUDED.action, severity = EXCLUDED.severity
+      RETURNING id, created_at
+    `) as unknown as RIRow[]
+    return reply.status(201).send({ id: rows[0]!.id, keyword: keyword.trim().toLowerCase(), action: action ?? 'flag', severity: severity ?? 'warning', createdAt: rows[0]!.created_at })
+  })
+
+  app.delete('/moderation/rules/:id', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id } = req.params as { id: string }
+    await adminDb`DELETE FROM moderation_rules WHERE id = ${id}`
+    return reply.status(204).send()
+  })
+
+  app.get('/moderation/events', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    type MRow = { id: string; client_id: string; client_name: string; matched_keyword: string; action_taken: string; content: string; resolved: boolean; created_at: string }
+    const rows = (await adminDb`
+      SELECT me.*, c.name AS client_name
+      FROM   moderation_events me
+      JOIN   clients c ON c.id = me.client_id
+      WHERE  me.resolved = FALSE
+      ORDER BY me.created_at DESC LIMIT 100
+    `) as unknown as MRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, clientId: r.client_id, clientName: r.client_name,
+      matchedKeyword: r.matched_keyword, actionTaken: r.action_taken,
+      content: r.content, resolved: r.resolved, createdAt: r.created_at,
+    })))
+  })
+
+  app.post('/moderation/events/:id/resolve', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id } = req.params as { id: string }
+    await adminDb`UPDATE moderation_events SET resolved = TRUE, resolved_by = 'operator', resolved_at = NOW() WHERE id = ${id}`
+    return reply.status(204).send()
+  })
+
+  // ── SUBSCRIPTIONS ─────────────────────────────────────────────
+
+  app.get('/subscriptions', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { clientId } = req.query as { clientId?: string }
+    type SRow = {
+      id: string; client_id: string; client_name: string; plan_name: string
+      status: string; trial_ends_at: string | null
+      current_period_start: string | null; current_period_end: string | null
+      amount: number | null; currency: string; created_at: string
+    }
+    const rows = clientId
+      ? (await adminDb`
+          SELECT s.*, c.name AS client_name, p.display_name AS plan_name
+          FROM subscriptions s JOIN clients c ON c.id = s.client_id JOIN plans p ON p.id = s.plan_id
+          WHERE s.client_id = ${clientId} ORDER BY s.created_at DESC
+        `) as unknown as SRow[]
+      : (await adminDb`
+          SELECT s.*, c.name AS client_name, p.display_name AS plan_name
+          FROM subscriptions s JOIN clients c ON c.id = s.client_id JOIN plans p ON p.id = s.plan_id
+          ORDER BY s.created_at DESC LIMIT 200
+        `) as unknown as SRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, clientId: r.client_id, clientName: r.client_name, planName: r.plan_name,
+      status: r.status, trialEndsAt: r.trial_ends_at, amount: r.amount, currency: r.currency,
+      currentPeriodStart: r.current_period_start, currentPeriodEnd: r.current_period_end,
+      createdAt: r.created_at,
+    })))
+  })
+
+  app.patch('/subscriptions/:id', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id } = req.params as { id: string }
+    const b = req.body as { status?: string; trialEndsAt?: string }
+    await adminDb`
+      UPDATE subscriptions SET
+        status        = COALESCE(${b.status ?? null}, status),
+        trial_ends_at = COALESCE(${b.trialEndsAt ?? null}::TIMESTAMPTZ, trial_ends_at),
+        updated_at    = NOW()
+      WHERE id = ${id}
+    `
+    return reply.status(204).send()
+  })
+
+  app.get('/revenue', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    type RevRow = { status: string; count: string; total_amount: string }
+    const rows = (await adminDb`
+      SELECT status, COUNT(*)::text AS count, COALESCE(SUM(amount), 0)::text AS total_amount
+      FROM subscriptions GROUP BY status
+    `) as unknown as RevRow[]
+    type PlanRow = { plan_name: string; count: string }
+    const planRows = (await adminDb`
+      SELECT p.display_name AS plan_name, COUNT(*)::text AS count
+      FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+      WHERE s.status IN ('active','trial')
+      GROUP BY p.display_name ORDER BY count DESC
+    `) as unknown as PlanRow[]
+
+    const byStatus: Record<string, { count: number; amount: number }> = {}
+    for (const r of rows) {
+      byStatus[r.status] = { count: parseInt(r.count, 10), amount: parseFloat(r.total_amount) }
+    }
+    const active = byStatus['active'] ?? { count: 0, amount: 0 }
+    const trial  = byStatus['trial']  ?? { count: 0, amount: 0 }
+
+    return reply.send({
+      mrr: active.amount,
+      activeSubscriptions: active.count,
+      trialSubscriptions:  trial.count,
+      byStatus,
+      byPlan: planRows.map(p => ({ planName: p.plan_name, count: parseInt(p.count, 10) })),
+    })
+  })
+
+  // ── CLIENT MODERATION ACTIONS ─────────────────────────────────
+
+  app.post('/clients/:clientId/warn', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { clientId } = req.params as { clientId: string }
+    const { reason } = req.body as { reason?: string }
+    await adminDb`UPDATE clients SET warning_count = warning_count + 1, updated_at = NOW() WHERE id = ${clientId}`
+    await adminDb`
+      INSERT INTO moderation_events (client_id, matched_keyword, action_taken, content)
+      VALUES (${clientId}, 'manual', 'warn', ${reason ?? 'Manual warning by operator'})
+    `
+    return reply.status(204).send()
+  })
+
+  app.post('/clients/:clientId/suspend', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { clientId } = req.params as { clientId: string }
+    const { reason } = req.body as { reason?: string }
+    await adminDb`
+      UPDATE clients SET status = 'suspended', suspended_at = NOW(),
+        suspension_reason = ${reason ?? 'Manual suspension by operator'}, updated_at = NOW()
+      WHERE id = ${clientId}
+    `
+    return reply.status(204).send()
+  })
+
+  app.post('/clients/:clientId/unsuspend', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { clientId } = req.params as { clientId: string }
+    await adminDb`
+      UPDATE clients SET status = 'active', suspended_at = NULL,
+        suspension_reason = NULL, warning_count = 0, updated_at = NOW()
+      WHERE id = ${clientId}
+    `
+    return reply.status(204).send()
+  })
+
+  // ── OPT-OUT MANAGEMENT ────────────────────────────────────────
+
+  app.get('/optouts', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { clientId } = req.query as { clientId?: string }
+    type ORow = {
+      id: string; client_id: string; phone_number: string
+      opted_out: boolean; opted_out_at: string | null; opted_in_at: string | null; updated_at: string
+    }
+    const rows = clientId
+      ? (await adminDb`SELECT * FROM optout_registry WHERE client_id = ${clientId} AND opted_out = TRUE ORDER BY updated_at DESC`) as unknown as ORow[]
+      : (await adminDb`SELECT * FROM optout_registry WHERE opted_out = TRUE ORDER BY updated_at DESC LIMIT 200`) as unknown as ORow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, clientId: r.client_id, phoneNumber: r.phone_number,
+      optedOut: r.opted_out, optedOutAt: r.opted_out_at, optedInAt: r.opted_in_at, updatedAt: r.updated_at,
+    })))
+  })
+
+  // ── MESSAGE TEMPLATES (GLOBAL LIBRARY) ───────────────────────
+
+  app.get('/message-templates', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    type TRow = {
+      id: string; name: string; category: string
+      content: string; variables: string[]; is_global: boolean; created_at: string
+    }
+    const rows = (await adminDb`
+      SELECT id, name, category, content, variables, is_global, created_at
+      FROM message_templates WHERE is_global = TRUE OR client_id IS NULL
+      ORDER BY category, name
+    `) as unknown as TRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, name: r.name, category: r.category,
+      content: r.content, variables: r.variables, isGlobal: r.is_global, createdAt: r.created_at,
+    })))
+  })
+
+  app.post('/message-templates', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const b = req.body as { name?: string; category?: string; content?: string; variables?: string[] }
+    if (!b.name?.trim() || !b.content?.trim()) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'name and content required' })
+    }
+    type TIRow = { id: string; created_at: string }
+    const rows = (await adminDb`
+      INSERT INTO message_templates (name, category, content, variables, is_global)
+      VALUES (${b.name.trim()}, ${b.category ?? 'general'}, ${b.content.trim()}, ${b.variables ?? []}, TRUE)
+      RETURNING id, created_at
+    `) as unknown as TIRow[]
+    return reply.status(201).send({
+      id: rows[0]!.id, name: b.name.trim(), category: b.category ?? 'general',
+      content: b.content.trim(), variables: b.variables ?? [], isGlobal: true, createdAt: rows[0]!.created_at,
+    })
+  })
+
+  app.delete('/message-templates/:id', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id } = req.params as { id: string }
+    await adminDb`DELETE FROM message_templates WHERE id = ${id} AND is_global = TRUE`
+    return reply.status(204).send()
+  })
+
+  // ── FLUTTERWAVE WEBHOOK (public — no operator auth) ───────────
+
+  app.post('/flw-webhook', {
+    config: { skipAuth: true },
+  }, async (req, reply) => {
+    const secretHash = process.env['FLW_SECRET_HASH'] ?? ''
+    const sig = req.headers['verif-hash'] as string | undefined
+    if (!sig || sig !== secretHash) {
+      return reply.status(401).send({ error: 'INVALID_SIGNATURE' })
+    }
+
+    const body = req.body as {
+      event?: string
+      data?: {
+        id?: number; tx_ref?: string; status?: string; amount?: number; currency?: string
+        customer?: { id?: number; email?: string; phone_number?: string }
+      }
+    }
+
+    if (body.event === 'charge.completed' && body.data?.status === 'successful') {
+      const txRef = body.data.tx_ref ?? ''
+      // tx_ref format: sub_{clientId}_{timestamp}
+      const match = txRef.match(/^sub_([a-f0-9-]+)_/)
+      if (match?.[1]) {
+        const clientId = match[1]
+        await adminDb`
+          UPDATE subscriptions SET
+            status = 'active',
+            flw_tx_id = ${String(body.data.id ?? '')},
+            flw_customer_id = ${String(body.data.customer?.id ?? '')},
+            amount = ${body.data.amount ?? null},
+            currency = ${body.data.currency ?? 'NGN'},
+            current_period_start = NOW(),
+            current_period_end   = NOW() + INTERVAL '30 days',
+            next_payment_at      = NOW() + INTERVAL '30 days',
+            updated_at           = NOW()
+          WHERE client_id = ${clientId}
+        `
+        await adminDb`UPDATE clients SET status = 'active', updated_at = NOW() WHERE id = ${clientId}`
+      }
+    }
+
+    return reply.status(200).send({ received: true })
+  })
+
   // ── Sub-plugins ─────────────────────────────────────────────
   // requests.ts      → /requests, /requests/:id/approve, /requests/:id/reject
   //                    /ai-templates, /ai-templates/:id

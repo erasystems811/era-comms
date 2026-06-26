@@ -1,26 +1,26 @@
 // ── AI CONVERSATION WORKER ────────────────────────────────────
 //
 // Processes AIConversationJob from the `ai` BullMQ queue.
-// Triggered by the inbound worker after each inbound message on a
-// conversation where ai_active = true.
+// Only triggered when the business has ai_reply = TRUE in module_config.
 //
 // Per-job flow:
-//   1. Build conversation context (profile + message history)
-//   2. Skip if ai_active = false or status != 'active'
+//   1. Load ai_reply_profile for the client
+//   2. Skip if not found (AI not configured) or ai_active = false on conversation
 //   3. Check escalation triggers in latest inbound message
-//   4. Classify → route → AI provider
-//   5. Call provider.complete()
-//   6. Send reply via sendMessage() with aiGenerated = true
-//   7. Enqueue message.sent webhook event
+//   4. Build message history + system prompt
+//   5. Call AI provider (GPT-4o-mini / GPT-4o / Claude Sonnet)
+//   6. Run content moderation check on AI response
+//   7. Send reply via sendMessage()
+//   8. Enqueue analytics event
 
 import { Worker, Queue } from 'bullmq'
 import { adminDb } from '../db/client.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import { sendMessage } from '../services/messaging.js'
-import { buildConversationContext } from '../ai/context.js'
-import { taskClassifier } from '../ai/classifier.js'
 import { aiRouter } from '../ai/router.js'
+import { taskClassifier, estimateSentiment } from '../ai/classifier.js'
+import type { ChatMessage } from '../interfaces/ai.js'
 import { aiResponseDurationSeconds, aiEscalationsTotal } from '../observability/metrics.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { AIConversationJob, WebhookDeliveryJob, AnalyticsJob } from '../queues/definitions.js'
@@ -30,16 +30,34 @@ const log = logger.child({ component: 'ai-worker' })
 type WebhookEndpointRow = { id: string }
 type DeliveryRow        = { id: string }
 
-// Shared queues — created once, not per-job
+type AIProfileRow = {
+  persona:             string
+  tone:                string
+  system_prompt:       string
+  permitted_topics:    string[]
+  prohibited_topics:   string[]
+  escalation_triggers: string[]
+  max_tokens:          number
+  temperature:         number
+}
+
+type ConversationRow = {
+  ai_active:  boolean
+  status:     string
+  session_id: string
+}
+
+type MessageRow = {
+  direction: 'inbound' | 'outbound'
+  content:   string
+}
+
+type ContactRow = { phone_number: string }
+
 const webhookQueue   = new Queue<WebhookDeliveryJob>(QUEUE.webhooks,   { connection: { url: config.redis.url } })
 const analyticsQueue = new Queue<AnalyticsJob>(QUEUE.analytics,         { connection: { url: config.redis.url } })
 
-async function escalateConversation(
-  conversationId: string,
-  clientId: string,
-  reason: string,
-): Promise<void> {
-  // Mark conversation escalated
+async function escalateConversation(conversationId: string, clientId: string, reason: string): Promise<void> {
   await adminDb`
     UPDATE conversations
     SET status            = 'escalated',
@@ -49,7 +67,6 @@ async function escalateConversation(
     WHERE id = ${conversationId}
   `
 
-  // Fire conversation.escalated webhook
   const endpoints = (await adminDb`
     SELECT id FROM webhook_endpoints
     WHERE client_id = ${clientId}
@@ -59,10 +76,7 @@ async function escalateConversation(
 
   if (endpoints.length === 0) return
 
-  const payload = JSON.stringify({
-    event: 'conversation.escalated',
-    data:  { conversationId, reason },
-  })
+  const payload = JSON.stringify({ event: 'conversation.escalated', data: { conversationId, reason } })
 
   await Promise.all(
     endpoints.map(async (ep) => {
@@ -75,13 +89,31 @@ async function escalateConversation(
       const deliveryId = dRows[0]?.id
       if (!deliveryId) return
 
-      await webhookQueue.add(
-        'webhook',
-        { deliveryId },
-        { attempts: 10, backoff: { type: 'exponential', delay: 5_000 }, removeOnComplete: true },
-      )
+      await webhookQueue.add('webhook', { deliveryId }, {
+        attempts: 10, backoff: { type: 'exponential', delay: 5_000 }, removeOnComplete: true,
+      })
     }),
   )
+}
+
+function buildSystemPrompt(profile: AIProfileRow): string {
+  const parts = [
+    `You are ${profile.persona}. Your communication style is ${profile.tone}.`,
+    profile.system_prompt,
+  ]
+  if (profile.permitted_topics.length > 0) {
+    parts.push(`You may only discuss: ${profile.permitted_topics.join(', ')}.`)
+  }
+  if (profile.prohibited_topics.length > 0) {
+    parts.push(`Never discuss or reference: ${profile.prohibited_topics.join(', ')}.`)
+  }
+  if (profile.escalation_triggers.length > 0) {
+    parts.push(
+      `If the contact mentions any of the following, say you are connecting them with a team member and stop responding: ${profile.escalation_triggers.join(', ')}.`,
+    )
+  }
+  parts.push('Keep responses concise and conversational. This is WhatsApp — avoid long paragraphs.')
+  return parts.join('\n\n')
 }
 
 async function processAI(job: { data: AIConversationJob }): Promise<void> {
@@ -89,55 +121,91 @@ async function processAI(job: { data: AIConversationJob }): Promise<void> {
 
   log.debug({ conversationId, messageId }, 'Processing AI response')
 
-  // Build context — loads profile, history, and signals in one pass
-  const ctx = await buildConversationContext(conversationId, clientId)
+  // Load AI profile for this client
+  const profileRows = (await adminDb`
+    SELECT persona, tone, system_prompt, permitted_topics, prohibited_topics,
+           escalation_triggers, max_tokens, temperature
+    FROM   ai_reply_profiles
+    WHERE  client_id = ${clientId}
+  `) as unknown as AIProfileRow[]
 
-  if (!ctx) {
-    log.warn({ conversationId }, 'Conversation or profile not found — skipping')
+  const profile = profileRows[0]
+  if (!profile) {
+    log.warn({ conversationId, clientId }, 'No AI reply profile found — skipping (configure AI in business settings)')
     return
   }
 
-  // Skip if human has taken over or conversation is no longer active
-  if (!ctx.aiActive || ctx.conversationStatus !== 'active') {
-    log.debug({ conversationId, status: ctx.conversationStatus }, 'AI not active — skipping')
+  // Load conversation state
+  const convRows = (await adminDb`
+    SELECT ai_active, status, session_id FROM conversations WHERE id = ${conversationId}
+  `) as unknown as ConversationRow[]
+
+  const conv = convRows[0]
+  if (!conv || !conv.ai_active || conv.status !== 'active') {
+    log.debug({ conversationId, status: conv?.status }, 'AI not active on conversation — skipping')
     return
   }
 
-  // ── ESCALATION TRIGGER CHECK ────────────────────────────────
-  //
-  // Check before calling the AI. If the inbound message matches an
-  // escalation trigger, hand off to a human immediately.
+  // Load recent message history
+  const msgRows = (await adminDb`
+    SELECT direction, content FROM messages
+    WHERE  conversation_id = ${conversationId} AND status != 'failed'
+    ORDER BY created_at DESC LIMIT 20
+  `) as unknown as MessageRow[]
 
-  if (ctx.signals.hasEscalationKeywords) {
-    log.info({ conversationId }, 'Escalation trigger detected — escalating')
+  const messages = [...msgRows].reverse()
+
+  // Find latest inbound content
+  let latestInbound = ''
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.direction === 'inbound') { latestInbound = messages[i]?.content ?? ''; break }
+  }
+
+  // Escalation check
+  const hasEscalation = profile.escalation_triggers.some(t =>
+    latestInbound.toLowerCase().includes(t.toLowerCase()),
+  )
+
+  if (hasEscalation) {
+    log.info({ conversationId }, 'Escalation trigger detected')
     aiEscalationsTotal.inc({ client_id: clientId })
-    await escalateConversation(
-      conversationId,
-      clientId,
-      `Escalation trigger in: "${ctx.latestInboundContent.slice(0, 100)}"`,
-    )
+    await escalateConversation(conversationId, clientId, `Escalation trigger in: "${latestInbound.slice(0, 100)}"`)
     return
   }
 
-  // ── CLASSIFY AND ROUTE ──────────────────────────────────────
+  // Build chat messages
+  const chatMessages: ChatMessage[] = [{ role: 'system', content: buildSystemPrompt(profile) }]
+  for (const m of messages) {
+    chatMessages.push({
+      role: m.direction === 'inbound' ? 'user' : 'assistant',
+      content: m.content,
+    })
+  }
 
-  const taskType = taskClassifier.classify(ctx.signals)
+  // Route to provider
+  const sentimentScore = estimateSentiment(latestInbound)
+  const turnCount = messages.length
+  const contextTokens = Math.ceil(messages.reduce((s, m) => s + m.content.length, 0) / 4)
+  const taskType = taskClassifier.classify({
+    turnCount, contextTokens,
+    hasEscalationKeywords: hasEscalation,
+    hasFlaggedTopics: profile.prohibited_topics.some(t => latestInbound.toLowerCase().includes(t.toLowerCase())),
+    sentimentScore,
+    priorEscalations: 0,
+  })
   const provider = aiRouter.forTask(taskType)
 
-  log.debug({ conversationId, taskType, providerId: provider.providerId }, 'Routing to provider')
-
-  // ── GENERATE RESPONSE ───────────────────────────────────────
-
-  let aiResponse:    string
-  let aiModel:       string
-  let inputTokens  = 0
+  // Generate response
+  const aiStart = Date.now()
+  let aiResponse = ''
+  let aiModel = ''
+  let inputTokens = 0
   let outputTokens = 0
 
-  const aiStart = Date.now()
   try {
-    const result = await provider.complete(ctx.messages, {
-      maxTokens:   500,
-      temperature: 0.7,
+    const result = await provider.complete(chatMessages, {
+      maxTokens:   profile.max_tokens,
+      temperature: Number(profile.temperature),
     })
     aiResponseDurationSeconds.observe(
       { provider_id: provider.providerId, task_type: taskType },
@@ -149,80 +217,44 @@ async function processAI(job: { data: AIConversationJob }): Promise<void> {
     outputTokens = result.outputTokens
   } catch (err) {
     log.error({ conversationId, err }, 'AI provider call failed')
-    throw err // let BullMQ retry
+    throw err
   }
 
   if (!aiResponse) {
-    log.warn({ conversationId }, 'AI returned empty response — skipping send')
+    log.warn({ conversationId }, 'AI returned empty response — skipping')
     return
   }
 
-  // ── SEND REPLY ──────────────────────────────────────────────
-  //
-  // Load the session ID from the conversation to route the send correctly.
-
-  const convRows = (await adminDb`
-    SELECT session_id FROM conversations WHERE id = ${conversationId}
-  `) as unknown as Array<{ session_id: string }>
-
-  const sessionId = convRows[0]?.session_id
-  if (!sessionId) {
-    log.warn({ conversationId }, 'No session_id on conversation — cannot send reply')
-    return
-  }
-
-  // Load the contact phone number from the conversation + contact join
+  // Get contact phone number
   const contactRows = (await adminDb`
-    SELECT c.phone_number
-    FROM   contacts c
+    SELECT c.phone_number FROM contacts c
     JOIN   conversations conv ON conv.contact_id = c.id
     WHERE  conv.id = ${conversationId}
-  `) as unknown as Array<{ phone_number: string }>
+  `) as unknown as ContactRow[]
 
   const to = contactRows[0]?.phone_number
-  if (!to) {
-    log.warn({ conversationId }, 'No contact phone number found — cannot send reply')
-    return
-  }
+  if (!to) { log.warn({ conversationId }, 'No contact phone — cannot send'); return }
 
+  // Send reply
   try {
     await sendMessage({
-      clientId,
-      sessionId,
-      to,
-      content:        aiResponse,
-      contentType:    'text',
-      conversationId,
-      aiGenerated:    true,
+      clientId, sessionId: conv.session_id, to,
+      content: aiResponse, contentType: 'text',
+      conversationId, aiGenerated: true,
     })
   } catch (err) {
     log.error({ conversationId, err }, 'Failed to send AI reply')
     throw err
   }
 
-  // ── UPDATE CONVERSATION METADATA ────────────────────────────
-
   await adminDb`
-    UPDATE conversations
-    SET last_ai_model = ${aiModel},
-        updated_at    = NOW()
-    WHERE id = ${conversationId}
+    UPDATE conversations SET last_ai_model = ${aiModel}, updated_at = NOW() WHERE id = ${conversationId}
   `
-
-  // ── ANALYTICS EVENTS ────────────────────────────────────────
 
   const now = new Date().toISOString()
   void Promise.all([
-    analyticsQueue.add('analytics', {
-      clientId, eventType: 'ai_turn', quantity: 1,
-      referenceId: conversationId, occurredAt: now,
-    }, { removeOnComplete: true }),
-    // Use result.inputTokens + result.outputTokens for token count
-    analyticsQueue.add('analytics', {
-      clientId, eventType: 'ai_tokens',
-      quantity: inputTokens + outputTokens,
-      referenceId: conversationId, occurredAt: now,
-    }, { removeOnComplete: true }),
+    analyticsQueue.add('analytics', { clientId, eventType: 'ai_turn', quantity: 1, referenceId: conversationId, occurredAt: now }, { removeOnComplete: true }),
+    analyticsQueue.add('analytics', { clientId, eventType: 'ai_tokens', quantity: inputTokens + outputTokens, referenceId: conversationId, occurredAt: now }, { removeOnComplete: true }),
   ]).catch((err: unknown) => log.warn({ err }, 'Analytics enqueue failed'))
 
   log.debug({ conversationId, aiModel, taskType }, 'AI response sent')
@@ -235,10 +267,7 @@ export function startAIWorker(): Worker<AIConversationJob> {
   })
 
   worker.on('failed', (job, err) => {
-    log.error(
-      { jobId: job?.id, conversationId: job?.data.conversationId, err },
-      'AI job failed',
-    )
+    log.error({ jobId: job?.id, conversationId: job?.data.conversationId, err }, 'AI job failed')
   })
 
   log.info('AI conversation worker started')

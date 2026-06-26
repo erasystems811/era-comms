@@ -11,7 +11,7 @@
 // Webhook HTTP dispatch is queued AFTER the transaction commits.
 
 import { Worker, Queue } from 'bullmq'
-import { withClient } from '../db/client.js'
+import { withClient, adminDb } from '../db/client.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import { getOrProvisionProfileVersion } from '../services/messaging.js'
@@ -89,7 +89,7 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
             client_id, contact_id, session_id, profile_version_id, status, ai_active
           ) VALUES (
             ${msg.clientId}, ${contactId}, ${msg.sessionId}, ${profileVersionId},
-            'active', TRUE
+            'active', FALSE
           )
           RETURNING id, ai_active, total_turns
         `) as unknown as ConvRow[]
@@ -171,6 +171,72 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
       messagesInboundTotal.inc({ session_id: msg.sessionId })
     }
 
+    // ── Opt-out handling (STOP / UNSTOP) ──────────────────────────
+    if (messageInserted) {
+      const normalised = msg.content.trim().toUpperCase()
+      if (normalised === 'STOP' || normalised === 'UNSUBSCRIBE') {
+        await adminDb`
+          INSERT INTO optout_registry (client_id, phone_number, opted_out, opted_out_at)
+          VALUES (${msg.clientId}, ${msg.from}, TRUE, NOW())
+          ON CONFLICT (client_id, phone_number)
+          DO UPDATE SET opted_out = TRUE, opted_out_at = NOW(), updated_at = NOW()
+        `
+        log.info({ phone: msg.from, clientId: msg.clientId }, 'Opt-out registered (STOP)')
+      } else if (normalised === 'START' || normalised === 'UNSTOP') {
+        await adminDb`
+          INSERT INTO optout_registry (client_id, phone_number, opted_out, opted_in_at)
+          VALUES (${msg.clientId}, ${msg.from}, FALSE, NOW())
+          ON CONFLICT (client_id, phone_number)
+          DO UPDATE SET opted_out = FALSE, opted_in_at = NOW(), updated_at = NOW()
+        `
+        log.info({ phone: msg.from, clientId: msg.clientId }, 'Opt-in registered (START)')
+      }
+    }
+
+    // ── Moderation check ──────────────────────────────────────────
+    if (messageInserted) {
+      type RuleRow = { keyword: string; action: string }
+      const rules = (await adminDb`SELECT keyword, action FROM moderation_rules`) as unknown as RuleRow[]
+      const lower = msg.content.toLowerCase()
+      const matched = rules.find(r => lower.includes(r.keyword.toLowerCase()))
+
+      if (matched) {
+        log.warn({ clientId: msg.clientId, keyword: matched.keyword, action: matched.action }, 'Moderation rule matched')
+
+        // Log the event
+        await adminDb`
+          INSERT INTO moderation_events (client_id, matched_keyword, action_taken, content)
+          VALUES (${msg.clientId}, ${matched.keyword}, ${matched.action}, ${msg.content.slice(0, 500)})
+        `
+
+        if (matched.action === 'warn') {
+          const updated = (await adminDb`
+            UPDATE clients SET warning_count = warning_count + 1, updated_at = NOW()
+            WHERE id = ${msg.clientId}
+            RETURNING warning_count
+          `) as unknown as Array<{ warning_count: number }>
+
+          if ((updated[0]?.warning_count ?? 0) >= 3) {
+            await adminDb`
+              UPDATE clients SET status = 'suspended', suspended_at = NOW(),
+                suspension_reason = 'Auto-suspended: 3 or more moderation violations',
+                updated_at = NOW()
+              WHERE id = ${msg.clientId}
+            `
+            log.warn({ clientId: msg.clientId }, 'Client auto-suspended after 3 violations')
+          }
+        } else if (matched.action === 'suspend') {
+          await adminDb`
+            UPDATE clients SET status = 'suspended', suspended_at = NOW(),
+              suspension_reason = ${`Auto-suspended: matched keyword "${matched.keyword}"`},
+              updated_at = NOW()
+            WHERE id = ${msg.clientId}
+          `
+          log.warn({ clientId: msg.clientId, keyword: matched.keyword }, 'Client auto-suspended immediately')
+        }
+      }
+    }
+
     // Enqueue webhook jobs after transaction commits
     if (deliveryIds.length > 0) {
       await Promise.all(
@@ -184,21 +250,31 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
       )
     }
 
-    // Enqueue AI job when the message was new and the conversation has AI active.
-    // The AI worker decides whether to respond (checks ai_active, escalation status, etc.).
+    // Enqueue AI job only when:
+    // 1. Message was new (not a duplicate)
+    // 2. The conversation has ai_active = TRUE (set when business enables AI reply)
+    // 3. The client has ai_reply enabled in their module_config
     if (messageInserted && aiActive) {
-      const contextTokens = Math.ceil(msg.content.length / 4)
-      await aiQueue.add(
-        'ai',
-        {
-          conversationId: convId,
-          clientId:       msg.clientId,
-          messageId:      msg.waMessageId,
-          turnCount,
-          contextTokens,
-        },
-        { attempts: 3, backoff: { type: 'exponential', delay: 10_000 }, removeOnComplete: true },
-      )
+      type ModRow = { ai_reply: boolean }
+      const modRows = (await adminDb`
+        SELECT ai_reply FROM module_config WHERE client_id = ${msg.clientId}
+      `) as unknown as ModRow[]
+      const aiReplyEnabled = modRows[0]?.ai_reply ?? false
+
+      if (aiReplyEnabled) {
+        const contextTokens = Math.ceil(msg.content.length / 4)
+        await aiQueue.add(
+          'ai',
+          {
+            conversationId: convId,
+            clientId:       msg.clientId,
+            messageId:      msg.waMessageId,
+            turnCount,
+            contextTokens,
+          },
+          { attempts: 3, backoff: { type: 'exponential', delay: 10_000 }, removeOnComplete: true },
+        )
+      }
     }
   }
 

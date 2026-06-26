@@ -14,6 +14,8 @@ export const QUEUE = {
   webhooks: 'webhooks',
   analytics: 'analytics',
   emailCampaign: 'email_campaign',
+  broadcast: 'broadcast',
+  automation: 'automation',
 } as const
 
 // ── REDIS CHANNELS (pub/sub) ──────────────────────────────────
@@ -76,6 +78,24 @@ export interface AIConversationJob {
 
 export interface WebhookDeliveryJob {
   deliveryId: string       // webhook_deliveries.id
+}
+
+export interface BroadcastRecipientJob {
+  broadcastId:  string
+  recipientId:  string
+  clientId:     string
+  sessionId:    string
+  to:           string
+  content:      string
+  contentType:  'text' | 'image' | 'audio' | 'video' | 'document'
+}
+
+export interface AutomationStepJob {
+  enrollmentId: string
+  flowId:       string
+  clientId:     string
+  sessionId:    string
+  phoneNumber:  string
 }
 
 export interface AnalyticsJob {

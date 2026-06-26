@@ -1056,6 +1056,277 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
       monthlyLimit:       planRows[0]?.monthly_message_cap ?? null,
     })
   })
+
+  // ── AI REPLY PROFILE (self-service) ───────────────────────────
+
+  app.get('/ai-profile', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type PRow = {
+      persona: string; tone: string; system_prompt: string
+      permitted_topics: string[]; prohibited_topics: string[]
+      escalation_triggers: string[]; max_tokens: number; temperature: number
+      ai_reply: boolean
+    }
+    const rows = (await adminDb`
+      SELECT p.*, COALESCE(m.ai_reply, FALSE) AS ai_reply
+      FROM   ai_reply_profiles p
+      LEFT JOIN module_config m ON m.client_id = p.client_id
+      WHERE  p.client_id = ${auth.clientId}
+    `) as unknown as PRow[]
+
+    if (!rows[0]) {
+      return reply.send({
+        exists: false, aiReply: false,
+        persona: 'a helpful business assistant',
+        tone: 'friendly and professional',
+        systemPrompt: "You are a helpful business assistant. Be concise and professional.",
+        permittedTopics: [], prohibitedTopics: [],
+        escalationTriggers: ['human', 'agent', 'speak to someone', 'call me'],
+        maxTokens: 500, temperature: 0.7,
+      })
+    }
+
+    const p = rows[0]!
+    return reply.send({
+      exists: true, aiReply: p.ai_reply,
+      persona: p.persona, tone: p.tone, systemPrompt: p.system_prompt,
+      permittedTopics: p.permitted_topics, prohibitedTopics: p.prohibited_topics,
+      escalationTriggers: p.escalation_triggers,
+      maxTokens: p.max_tokens, temperature: Number(p.temperature),
+    })
+  })
+
+  app.put('/ai-profile', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const b = req.body as {
+      aiReply?: boolean; persona?: string; tone?: string; systemPrompt?: string
+      permittedTopics?: string[]; prohibitedTopics?: string[]
+      escalationTriggers?: string[]; maxTokens?: number; temperature?: number
+    }
+
+    await adminDb`
+      INSERT INTO ai_reply_profiles (
+        client_id, persona, tone, system_prompt,
+        permitted_topics, prohibited_topics, escalation_triggers, max_tokens, temperature
+      ) VALUES (
+        ${auth.clientId},
+        ${b.persona ?? 'a helpful business assistant'},
+        ${b.tone ?? 'friendly and professional'},
+        ${b.systemPrompt ?? ''},
+        ${b.permittedTopics ?? []},
+        ${b.prohibitedTopics ?? []},
+        ${b.escalationTriggers ?? []},
+        ${b.maxTokens ?? 500},
+        ${b.temperature ?? 0.7}
+      )
+      ON CONFLICT (client_id) DO UPDATE SET
+        persona             = EXCLUDED.persona,
+        tone                = EXCLUDED.tone,
+        system_prompt       = EXCLUDED.system_prompt,
+        permitted_topics    = EXCLUDED.permitted_topics,
+        prohibited_topics   = EXCLUDED.prohibited_topics,
+        escalation_triggers = EXCLUDED.escalation_triggers,
+        max_tokens          = EXCLUDED.max_tokens,
+        temperature         = EXCLUDED.temperature,
+        updated_at          = NOW()
+    `
+
+    if (b.aiReply !== undefined) {
+      await adminDb`
+        INSERT INTO module_config (client_id, ai_reply)
+        VALUES (${auth.clientId}, ${b.aiReply})
+        ON CONFLICT (client_id) DO UPDATE SET ai_reply = ${b.aiReply}, updated_at = NOW()
+      `
+      if (b.aiReply) {
+        await adminDb`UPDATE conversations SET ai_active = TRUE WHERE client_id = ${auth.clientId} AND status = 'active'`
+      } else {
+        await adminDb`UPDATE conversations SET ai_active = FALSE WHERE client_id = ${auth.clientId}`
+      }
+    }
+
+    return reply.status(204).send()
+  })
+
+  // ── SUBSCRIPTION STATUS ────────────────────────────────────────
+
+  app.get('/subscription', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type SubRow = {
+      id: string; status: string; trial_ends_at: string | null
+      current_period_start: string | null; current_period_end: string | null
+      amount: number | null; currency: string; plan_name: string
+    }
+    const rows = (await adminDb`
+      SELECT s.*, p.display_name AS plan_name
+      FROM subscriptions s JOIN plans p ON p.id = s.plan_id
+      WHERE s.client_id = ${auth.clientId}
+      ORDER BY s.created_at DESC LIMIT 1
+    `) as unknown as SubRow[]
+
+    if (!rows[0]) return reply.send({ status: 'none' })
+    const s = rows[0]!
+    return reply.send({
+      id: s.id, status: s.status, planName: s.plan_name,
+      trialEndsAt: s.trial_ends_at, amount: s.amount, currency: s.currency,
+      currentPeriodStart: s.current_period_start, currentPeriodEnd: s.current_period_end,
+    })
+  })
+
+  // ── MESSAGE TEMPLATES (read + per-client) ─────────────────────
+
+  app.get('/message-templates', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type TRow = { id: string; name: string; category: string; content: string; variables: string[]; is_global: boolean }
+    const rows = (await adminDb`
+      SELECT id, name, category, content, variables, is_global
+      FROM message_templates
+      WHERE is_global = TRUE OR client_id = ${auth.clientId}
+      ORDER BY category, name
+    `) as unknown as TRow[]
+    return reply.send(rows.map(r => ({ id: r.id, name: r.name, category: r.category, content: r.content, variables: r.variables, isGlobal: r.is_global })))
+  })
+
+  app.post('/message-templates', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const b = req.body as { name?: string; category?: string; content?: string; variables?: string[] }
+    if (!b.name?.trim() || !b.content?.trim()) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'name and content required' })
+    }
+    type TIRow = { id: string }
+    const rows = (await adminDb`
+      INSERT INTO message_templates (client_id, name, category, content, variables, is_global)
+      VALUES (${auth.clientId}, ${b.name.trim()}, ${b.category ?? 'general'}, ${b.content.trim()}, ${b.variables ?? []}, FALSE)
+      RETURNING id
+    `) as unknown as TIRow[]
+    return reply.status(201).send({ id: rows[0]!.id, name: b.name.trim(), category: b.category ?? 'general', content: b.content.trim(), variables: b.variables ?? [], isGlobal: false })
+  })
+
+  // ── WHATSAPP SELF-CONNECT ──────────────────────────────────────
+  // Business requests a QR code to connect their own number.
+  // Operator-side session is provisioned first; this returns the session ID
+  // and a connect token. The business portal polls for QR via WebSocket.
+
+  app.post('/connect-whatsapp', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+
+    const { phoneNumber } = req.body as { phoneNumber?: string }
+    if (!phoneNumber?.trim()) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'phoneNumber is required (E.164 format)' })
+    }
+
+    // Check for existing pending/active session
+    type SRow = { id: string; status: string }
+    const existing = (await adminDb`
+      SELECT id, status FROM whatsapp_sessions
+      WHERE client_id = ${auth.clientId} AND phone_number = ${phoneNumber.trim()}
+      LIMIT 1
+    `) as unknown as SRow[]
+
+    let sessionId: string
+
+    if (existing[0]) {
+      sessionId = existing[0].id
+    } else {
+      const rows = (await adminDb`
+        INSERT INTO whatsapp_sessions (client_id, phone_number, role, status)
+        VALUES (${auth.clientId}, ${phoneNumber.trim()}, 'primary', 'pending_qr')
+        RETURNING id
+      `) as unknown as Array<{ id: string }>
+      sessionId = rows[0]!.id
+
+      await adminDb`
+        INSERT INTO warmup_profiles (session_id) VALUES (${sessionId})
+        ON CONFLICT DO NOTHING
+      `
+    }
+
+    // Issue a 30-min token so portal can authenticate the QR WebSocket
+    type TRow = { token: string; expires_at: string }
+    const tokenRows = (await adminDb`
+      INSERT INTO session_connect_tokens (client_id, session_id)
+      VALUES (${auth.clientId}, ${sessionId})
+      RETURNING token, expires_at
+    `) as unknown as TRow[]
+
+    return reply.status(201).send({
+      sessionId,
+      connectToken: tokenRows[0]!.token,
+      expiresAt:    tokenRows[0]!.expires_at,
+      qrWsUrl:      `/v1/admin/sessions/${sessionId}/qr`,
+    })
+  })
+
+  app.get('/whatsapp-sessions', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type SRow = { id: string; phone_number: string; status: string; connected_at: string | null; created_at: string }
+    const rows = (await adminDb`
+      SELECT id, phone_number, status, connected_at, created_at
+      FROM whatsapp_sessions WHERE client_id = ${auth.clientId}
+      ORDER BY created_at DESC
+    `) as unknown as SRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, phoneNumber: r.phone_number, status: r.status,
+      connectedAt: r.connected_at, createdAt: r.created_at,
+    })))
+  })
+
+  // ── OPT-OUT MANAGEMENT (self-service) ─────────────────────────
+
+  app.get('/optouts', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type ORow = { phone_number: string; opted_out_at: string | null; updated_at: string }
+    const rows = (await adminDb`
+      SELECT phone_number, opted_out_at, updated_at
+      FROM optout_registry WHERE client_id = ${auth.clientId} AND opted_out = TRUE
+      ORDER BY updated_at DESC LIMIT 200
+    `) as unknown as ORow[]
+    return reply.send(rows.map(r => ({ phoneNumber: r.phone_number, optedOutAt: r.opted_out_at, updatedAt: r.updated_at })))
+  })
+
+  // ── AUTOMATIONS (self-service, read-only) ──────────────────────
+
+  app.get('/automations', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type FRow = { id: string; name: string; description: string | null; trigger_type: string; status: string; total_enrolled: number; total_completed: number; created_at: string }
+    const rows = (await adminDb`
+      SELECT id, name, description, trigger_type, status, total_enrolled, total_completed, created_at
+      FROM automation_flows WHERE client_id = ${auth.clientId} AND status != 'archived'
+      ORDER BY created_at DESC
+    `) as unknown as FRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, name: r.name, description: r.description,
+      triggerType: r.trigger_type, status: r.status,
+      totalEnrolled: Number(r.total_enrolled), totalCompleted: Number(r.total_completed),
+      createdAt: r.created_at,
+    })))
+  })
+
+  // ── BROADCASTS (self-service, read-only) ──────────────────────
+
+  app.get('/broadcasts', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    type BRow = { id: string; name: string; status: string; total_recipients: number; total_sent: number; total_failed: number; created_at: string }
+    const rows = (await adminDb`
+      SELECT id, name, status, total_recipients, total_sent, total_failed, created_at
+      FROM whatsapp_broadcasts WHERE client_id = ${auth.clientId}
+      ORDER BY created_at DESC LIMIT 50
+    `) as unknown as BRow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, name: r.name, status: r.status,
+      totalRecipients: Number(r.total_recipients), totalSent: Number(r.total_sent),
+      totalFailed: Number(r.total_failed), createdAt: r.created_at,
+    })))
+  })
 }
 
 export default businessRoutes

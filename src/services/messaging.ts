@@ -226,7 +226,7 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
           INSERT INTO conversations (
             client_id, contact_id, session_id, profile_version_id, status, ai_active
           ) VALUES (
-            ${clientId}, ${contactId}, ${sessionId}, ${profileVersionId}, 'active', TRUE
+            ${clientId}, ${contactId}, ${sessionId}, ${profileVersionId}, 'active', FALSE
           )
           RETURNING id
         `) as unknown as Array<{ id: string }>
