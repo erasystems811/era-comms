@@ -275,8 +275,8 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
       {
         removeOnComplete: true,
         removeOnFail: 100,
-        attempts: 15,
-        backoff: { type: 'fixed', delay: 30_000 },  // retry every 30s for up to 7.5 min
+        attempts: Number.MAX_SAFE_INTEGER,
+        backoff: { type: 'fixed', delay: 30_000 },
       },
     )
   }

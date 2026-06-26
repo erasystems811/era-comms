@@ -241,7 +241,7 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
         content:      bc[0].content,
         contentType:  bc[0].content_type as 'text',
       }, {
-        attempts:        15,
+        attempts:        Number.MAX_SAFE_INTEGER,
         backoff:         { type: 'fixed', delay: 30_000 },
         removeOnComplete: true,
       })
