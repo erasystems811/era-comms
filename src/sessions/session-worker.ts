@@ -96,14 +96,14 @@ async function start(): Promise<void> {
   session.onMessage(async (msg: InboundMessage) => {
     workerLogger.debug({ from: msg.from, waMessageId: msg.waMessageId }, 'Inbound message')
 
-    void logEvent({
+    logEvent({
       eventType: 'message_received',
       severity:  'info',
       detail:    `Message received from ${msg.from}`,
       clientId,
       sessionId: SESSION_ID,
       metadata:  { from: msg.from, waMessageId: msg.waMessageId, contentType: msg.contentType },
-    })
+    }).catch((err: unknown) => workerLogger.error({ err }, 'message_received event write failed'))
 
     await inboundQueue.add('inbound', {
       sessionId: SESSION_ID,
@@ -135,14 +135,14 @@ async function start(): Promise<void> {
   // Apply WhatsApp Business profile once the session connects.
   // Runs automatically on first connect and on every reconnect.
   session.onConnected(async () => {
-    void logEvent({
+    logEvent({
       eventType: 'session_connected',
       severity:  'info',
       detail:    `Session connected (${phoneNumber})`,
       clientId,
       sessionId: SESSION_ID,
       metadata:  { phoneNumber },
-    })
+    }).catch((err: unknown) => workerLogger.error({ err }, 'session_connected event write failed'))
     type ProfileRow = { profile_name: string | null; profile_description: string | null; profile_picture_url: string | null }
     const profileRows = await q<ProfileRow>(
       adminDb`SELECT profile_name, profile_description, profile_picture_url FROM whatsapp_sessions WHERE id = ${SESSION_ID}`,
@@ -406,23 +406,23 @@ async function start(): Promise<void> {
           :                           'disconnected',
       })
       if (current === 'disconnected') {
-        void logEvent({
+        logEvent({
           eventType: 'session_disconnected',
           severity:  'warning',
           detail:    `Session disconnected (${phoneNumber}) — will auto-reconnect`,
           clientId,
           sessionId: SESSION_ID,
           metadata:  { phoneNumber },
-        })
+        }).catch((err: unknown) => workerLogger.error({ err }, 'session_disconnected event write failed'))
       } else if (current === 'banned') {
-        void logEvent({
+        logEvent({
           eventType: 'session_disconnected',
           severity:  'critical',
           detail:    `Session logged out by WhatsApp (${phoneNumber})`,
           clientId,
           sessionId: SESSION_ID,
           metadata:  { phoneNumber, reason: 'logged_out' },
-        })
+        }).catch((err: unknown) => workerLogger.error({ err }, 'session_disconnected event write failed'))
       }
     }
   }, 5_000)

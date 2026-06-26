@@ -22,11 +22,11 @@ export async function logEvent(opts: LogEventOptions): Promise<void> {
         ${opts.eventType},
         ${opts.severity ?? 'info'},
         ${opts.detail},
-        ${JSON.stringify(opts.metadata ?? {})}::jsonb
+        ${JSON.stringify(opts.metadata ?? {})}
       )
     `
   } catch (err) {
-    // Event logging must never crash the caller
     logger.warn({ err, eventType: opts.eventType }, 'Failed to write platform event')
+    throw err
   }
 }

@@ -76,6 +76,21 @@ const observabilityRoutes: FastifyPluginAsync = async (app) => {
     }))
   })
 
+  // ── GET /events/debug ─────────────────────────────────────
+  // Returns the last 20 raw rows from platform_events, no filters.
+  // Use this to check if events are reaching the DB at all.
+
+  app.get('/events/debug', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const rows = await adminDb`
+      SELECT id, event_type, severity, detail, created_at
+      FROM   platform_events
+      ORDER  BY created_at DESC
+      LIMIT  20
+    `
+    return rows
+  })
+
   // ── GET /audit ─────────────────────────────────────────────────
 
   app.get('/audit', async (req, reply) => {
