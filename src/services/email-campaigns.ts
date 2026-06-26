@@ -59,36 +59,43 @@ export async function launchCampaign(campaignId: string): Promise<{ queued: numb
     WHERE id = ${campaignId}
   `
 
-  // Create email_sends rows in bulk
   if (contacts.length > 0) {
-    const values = contacts.map(c => ({
-      campaign_id: campaignId,
-      client_id:   '',   // filled below
-      email:       c.email.toLowerCase(),
-      status:      'queued',
-    }))
-
-    // Get client_id from campaign
     const [camp] = await adminDb<{ client_id: string }[]>`
       SELECT client_id FROM email_campaigns WHERE id = ${campaignId}
     `
     if (!camp) throw new Error(`Campaign ${campaignId} not found`)
 
-    // Insert send rows
-    for (const c of contacts) {
-      await adminDb`
-        INSERT INTO email_sends (campaign_id, client_id, email, status)
-        VALUES (${campaignId}, ${camp.client_id}, ${c.email.toLowerCase()}, 'queued')
-        ON CONFLICT DO NOTHING
-      `
-    }
+    // Bulk-insert all send rows in one query using unnest
+    const emails     = contacts.map(c => c.email.toLowerCase())
+    const clientIds  = contacts.map(() => camp.client_id)
+    const campaignIds = contacts.map(() => campaignId)
+    const statuses   = contacts.map(() => 'queued')
 
-    // Enqueue one job per contact (rate-limited in worker)
+    await adminDb`
+      INSERT INTO email_sends (campaign_id, client_id, email, status)
+      SELECT * FROM unnest(
+        ${adminDb.array(campaignIds)}::uuid[],
+        ${adminDb.array(clientIds)}::uuid[],
+        ${adminDb.array(emails)}::text[],
+        ${adminDb.array(statuses)}::text[]
+      ) AS t(campaign_id, client_id, email, status)
+      ON CONFLICT DO NOTHING
+    `
+
+    // Fetch the inserted send IDs so we can embed them in job payloads (for unsubscribe links)
+    const sendRows = await adminDb<{ id: string; email: string }[]>`
+      SELECT id, email FROM email_sends WHERE campaign_id = ${campaignId}
+    `
+    const sendIdByEmail = new Map(sendRows.map(r => [r.email, r.id]))
+
+    // Enqueue one job per contact with sendId included
     const queue = getCampaignQueue()
     for (const c of contacts) {
+      const email = c.email.toLowerCase()
       await queue.add('send-email', {
         campaignId,
-        email:     c.email.toLowerCase(),
+        email,
+        sendId:    sendIdByEmail.get(email) ?? null,
         firstName: c.first_name,
         lastName:  c.last_name,
       }, {
@@ -213,20 +220,15 @@ export async function fireScheduledCampaigns(): Promise<void> {
   }
 }
 
-// Check if all sends are done and mark campaign as completed
+// Check if all sends are done using the campaign's own counters — no full table scan.
+// Called after each job completes; completes the campaign when sent+bounced+failed = total.
 export async function maybeCompleteCampaign(campaignId: string): Promise<void> {
-  const [stats] = await adminDb<{ total: string; pending: string }[]>`
-    SELECT
-      COUNT(*) AS total,
-      COUNT(*) FILTER (WHERE status = 'queued' OR status = 'sent') AS pending
-    FROM email_sends
-    WHERE campaign_id = ${campaignId}
+  await adminDb`
+    UPDATE email_campaigns
+    SET status = 'sent', completed_at = NOW(), updated_at = NOW()
+    WHERE id            = ${campaignId}
+      AND status        = 'sending'
+      AND total_recipients > 0
+      AND (total_sent + total_bounced + total_complained) >= total_recipients
   `
-  if (stats && Number(stats.pending) === 0) {
-    await adminDb`
-      UPDATE email_campaigns
-      SET status = 'sent', completed_at = NOW(), updated_at = NOW()
-      WHERE id = ${campaignId} AND status = 'sending'
-    `
-  }
 }

@@ -8,7 +8,6 @@
 // server limits. Adjust POSTAL_RATE_LIMIT env var to override.
 
 import { Worker, type Job } from 'bullmq'
-import { createHmac }      from 'node:crypto'
 import { adminDb }         from '../db/client.js'
 import { logger }          from '../shared/logger.js'
 import { postalSend }      from '../services/postal.js'
@@ -22,12 +21,13 @@ const log = logger.child({ component: 'email-campaign-worker' })
 export interface EmailCampaignJob {
   campaignId: string
   email:      string
+  sendId:     string | null
   firstName:  string | null
   lastName:   string | null
 }
 
 async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
-  const { campaignId, email, firstName } = job.data
+  const { campaignId, email, sendId, firstName } = job.data
 
   // Load campaign + template + domain in one query
   const [row] = await adminDb<{
@@ -58,11 +58,6 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
     return
   }
 
-  // Fetch the send row so we can embed its ID in the unsubscribe link
-  const [sendRow] = await adminDb<{ id: string }[]>`
-    SELECT id FROM email_sends WHERE campaign_id = ${campaignId} AND email = ${email} LIMIT 1
-  `
-
   // Basic personalisation
   const name = firstName ?? (email.split('@')[0] ?? email)
   let html = row.template_html
@@ -72,9 +67,9 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
   const subject = row.subject
     .replace(/\{\{first_name\}\}/gi, name)
 
-  // Inject unsubscribe link + List-Unsubscribe header
-  const unsubUrl = sendRow
-    ? `${config.publicUrl}/v1/email/unsubscribe?sid=${sendRow.id}`
+  // Unsubscribe link — sendId comes from job payload, no extra DB query needed
+  const unsubUrl = sendId
+    ? `${config.publicUrl}/v1/email/unsubscribe?sid=${sendId}`
     : null
 
   if (unsubUrl) {

@@ -45,11 +45,13 @@ async function processDueEnrollments(): Promise<void> {
     LIMIT 100
   `
 
-  for (const enrollment of due) {
-    await processStep(enrollment).catch(err =>
-      log.error({ enrollmentId: enrollment.id, err }, 'Enrollment step failed')
+  await Promise.allSettled(
+    due.map(enrollment =>
+      processStep(enrollment).catch(err =>
+        log.error({ enrollmentId: enrollment.id, err }, 'Enrollment step failed')
+      )
     )
-  }
+  )
 }
 
 async function processStep(e: Enrollment): Promise<void> {
