@@ -199,6 +199,20 @@ async function incrementCampaignStat(postalMessageId: string, column: string): P
   `
 }
 
+// Fire scheduled campaigns whose scheduled_at has passed
+export async function fireScheduledCampaigns(): Promise<void> {
+  const due = await adminDb<{ id: string }[]>`
+    SELECT id FROM email_campaigns
+    WHERE status = 'scheduled' AND scheduled_at <= NOW()
+  `
+  for (const { id } of due) {
+    log.info({ campaignId: id }, 'Auto-firing scheduled campaign')
+    await launchCampaign(id).catch(err =>
+      log.error({ campaignId: id, err }, 'Failed to auto-fire scheduled campaign')
+    )
+  }
+}
+
 // Check if all sends are done and mark campaign as completed
 export async function maybeCompleteCampaign(campaignId: string): Promise<void> {
   const [stats] = await adminDb<{ total: string; pending: string }[]>`

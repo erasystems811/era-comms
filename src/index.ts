@@ -10,9 +10,11 @@ import { startAIWorker } from './workers/ai-worker.js'
 import { startAnalyticsWorker } from './workers/analytics-worker.js'
 import { startBroadcastWorker } from './workers/broadcast-worker.js'
 import { startAutomationWorker } from './workers/automation-worker.js'
+import { startEmailCampaignWorker } from './workers/email-campaign-worker.js'
 import { CallSupervisor } from './voice/call-supervisor.js'
 import { queueDepth } from './observability/metrics.js'
 import { QUEUE } from './queues/definitions.js'
+import { fireScheduledCampaigns } from './services/email-campaigns.js'
 
 async function main(): Promise<void> {
   logger.info({ env: config.env }, 'ERA Comms starting')
@@ -27,8 +29,9 @@ async function main(): Promise<void> {
   const webhookWorker   = startWebhookWorker()
   const aiWorker        = startAIWorker()
   const analyticsWorker = startAnalyticsWorker()
-  const broadcastWorker = startBroadcastWorker()
-  const automationWorker = startAutomationWorker()
+  const broadcastWorker      = startBroadcastWorker()
+  const automationWorker     = startAutomationWorker()
+  const emailCampaignWorker  = startEmailCampaignWorker()
 
   // Start voice subsystem — connects to FreeSWITCH ESL
   const callSupervisor = new CallSupervisor()
@@ -44,6 +47,10 @@ async function main(): Promise<void> {
     logger.error({ err }, 'Failed to start API server')
     process.exit(1)
   }
+
+  // Scheduled-campaign poller — fires campaigns whose scheduled_at has passed
+  void fireScheduledCampaigns()
+  const scheduledCampaignPoller = setInterval(() => void fireScheduledCampaigns(), 60_000)
 
   // Queue depth poller — updates Prometheus gauges every 30 s
   const polledQueues = [
@@ -66,6 +73,7 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, 'Shutting down ERA Comms')
 
+    clearInterval(scheduledCampaignPoller)
     clearInterval(depthPoller)
     await Promise.all(polledQueues.map((q) => q.close()))
     callSupervisor.stop()
@@ -76,6 +84,7 @@ async function main(): Promise<void> {
     await analyticsWorker.close()
     await broadcastWorker.close()
     automationWorker.stop()
+    await emailCampaignWorker.close()
     await supervisor.stop()
 
     logger.info('ERA Comms stopped')
