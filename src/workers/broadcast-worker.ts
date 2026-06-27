@@ -1,9 +1,3 @@
-// ── BROADCAST WORKER ──────────────────────────────────────────
-//
-// Processes BroadcastRecipientJob from the `broadcast` BullMQ queue.
-// One job per recipient. Sends the message with jitter between sends
-// to avoid WhatsApp detecting bulk sending patterns.
-
 import { Worker } from 'bullmq'
 import { adminDb } from '../db/client.js'
 import { config } from '../shared/config.js'
@@ -15,11 +9,14 @@ import type { BroadcastRecipientJob } from '../queues/definitions.js'
 
 const log = logger.child({ component: 'broadcast-worker' })
 
+// Called only when sendMessage() itself fails (plan limit, banned session, DB error).
+// In that case the message never reaches session-worker, so we handle it here.
+// On success we do nothing — session-worker marks 'sent' after actual WhatsApp delivery.
 async function processRecipient(job: { data: BroadcastRecipientJob }): Promise<void> {
   const { broadcastId, recipientId, clientId, sessionId, to, content, contentType } = job.data
 
   try {
-    const result = await sendMessage({
+    await sendMessage({
       clientId,
       sessionId,
       to,
@@ -27,36 +24,21 @@ async function processRecipient(job: { data: BroadcastRecipientJob }): Promise<v
       contentType: contentType as 'text',
       idempotencyKey: `broadcast_${broadcastId}_${recipientId}`,
     })
-
-    await adminDb`
-      UPDATE broadcast_recipients
-      SET status     = 'sent',
-          message_id = ${result.messageId}::uuid,
-          sent_at    = NOW()
-      WHERE id = ${recipientId}
-    `
-
-    await adminDb`
-      UPDATE whatsapp_broadcasts
-      SET total_sent = total_sent + 1, updated_at = NOW()
-      WHERE id = ${broadcastId}
-    `
+    // Success: message is now queued in BullMQ for the session-worker.
+    // Do NOT touch broadcast_recipients or counters here — session-worker
+    // owns that after it confirms the actual WhatsApp send.
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err)
-    log.warn({ broadcastId, recipientId, to, err }, 'Broadcast recipient send failed')
+    log.warn({ broadcastId, recipientId, to, err }, 'Broadcast recipient could not be queued')
 
     await adminDb`
-      UPDATE broadcast_recipients
-      SET status = 'failed', error = ${errorMsg}
+      UPDATE broadcast_recipients SET status = 'failed', error = ${errorMsg}
       WHERE id = ${recipientId}
     `
-
     await adminDb`
-      UPDATE whatsapp_broadcasts
-      SET total_failed = total_failed + 1, updated_at = NOW()
+      UPDATE whatsapp_broadcasts SET total_failed = total_failed + 1, updated_at = NOW()
       WHERE id = ${broadcastId}
     `
-
     logEvent({
       eventType: 'message_failed',
       severity:  'critical',
@@ -65,10 +47,19 @@ async function processRecipient(job: { data: BroadcastRecipientJob }): Promise<v
       sessionId,
       metadata:  { broadcastId, recipientId, to, error: errorMsg },
     }).catch((e: unknown) => log.error({ e }, 'broadcast queue-failure event write failed'))
-    // Don't re-throw — one failed recipient should not block the rest
-  }
 
-  // Check if broadcast is complete (all recipients processed)
+    // This recipient will never reach session-worker, so check completion here.
+    await checkBroadcastCompletion({ broadcastId, clientId, sessionId })
+  }
+}
+
+async function checkBroadcastCompletion(opts: {
+  broadcastId: string
+  clientId:    string
+  sessionId:   string
+}): Promise<void> {
+  const { broadcastId, clientId, sessionId } = opts
+
   type CountRow = { pending: string; name: string; total_sent: string; total_failed: string }
   const counts = (await adminDb`
     SELECT
@@ -96,7 +87,7 @@ async function processRecipient(job: { data: BroadcastRecipientJob }): Promise<v
     logEvent({
       eventType: 'broadcast_completed',
       severity:  failed > 0 ? 'warning' : 'info',
-      detail:    `Broadcast "${name}" completed: ${sent} queued, ${failed} failed`,
+      detail:    `Broadcast "${name}" completed: ${sent} sent, ${failed} failed`,
       clientId,
       sessionId,
       metadata:  { broadcastId, totalSent: sent, totalFailed: failed },
@@ -104,10 +95,12 @@ async function processRecipient(job: { data: BroadcastRecipientJob }): Promise<v
   }
 }
 
+export { checkBroadcastCompletion }
+
 export function startBroadcastWorker(): Worker<BroadcastRecipientJob> {
   const worker = new Worker<BroadcastRecipientJob>(QUEUE.broadcast, processRecipient, {
     connection:  { url: config.redis.url },
-    concurrency: 3, // 3 sends in parallel max — keeps it human-paced
+    concurrency: 3,
   })
 
   worker.on('failed', (job, err) => {

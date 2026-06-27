@@ -17,6 +17,7 @@ import { checkWarmup, incrementDailyCount } from '../anti-detection/warmup.js'
 import { updateRiskScore } from '../anti-detection/risk.js'
 import { recordMessageSent } from '../services/plan.js'
 import { logEvent } from '../services/events.js'
+import { checkBroadcastCompletion } from '../workers/broadcast-worker.js'
 import {
   QUEUE,
   KEY,
@@ -289,12 +290,23 @@ async function start(): Promise<void> {
           WHERE id = ${messageId}
         `
 
-        // Broadcast retry succeeded — restore recipient to sent and fix counters.
-        if (broadcastId && recipientId && priorStatus === 'failed') {
-          void Promise.all([
-            adminDb`UPDATE broadcast_recipients SET status = 'sent', sent_at = NOW(), error = NULL WHERE id = ${recipientId}`,
-            adminDb`UPDATE whatsapp_broadcasts SET total_sent = total_sent + 1, total_failed = GREATEST(0, total_failed - 1), updated_at = NOW() WHERE id = ${broadcastId}`,
-          ]).catch((err: unknown) => workerLogger.warn({ err }, 'Broadcast retry-success counter fix failed'))
+        // Session-worker exclusively owns broadcast_recipients status.
+        // Mark sent and update counters, then check if the broadcast is complete.
+        if (broadcastId && recipientId) {
+          const sentUpdate = priorStatus === 'failed'
+            // Retry success: was failed, now delivered — restore counters
+            ? Promise.all([
+                adminDb`UPDATE broadcast_recipients SET status = 'sent', sent_at = NOW(), error = NULL WHERE id = ${recipientId}`,
+                adminDb`UPDATE whatsapp_broadcasts SET total_sent = total_sent + 1, total_failed = GREATEST(0, total_failed - 1), updated_at = NOW() WHERE id = ${broadcastId}`,
+              ])
+            // First send success
+            : Promise.all([
+                adminDb`UPDATE broadcast_recipients SET status = 'sent', sent_at = NOW() WHERE id = ${recipientId}`,
+                adminDb`UPDATE whatsapp_broadcasts SET total_sent = total_sent + 1, updated_at = NOW() WHERE id = ${broadcastId}`,
+              ])
+          void sentUpdate
+            .then(() => checkBroadcastCompletion({ broadcastId, clientId, sessionId: SESSION_ID }))
+            .catch((err: unknown) => workerLogger.warn({ err }, 'Broadcast sent update failed'))
         }
 
         void adminDb`
@@ -318,12 +330,15 @@ async function start(): Promise<void> {
           metadata:  { messageId, to, error: String(err), broadcastId, recipientId },
         }).catch((e: unknown) => workerLogger.error({ e }, 'message_failed event write failed'))
 
-        // First broadcast failure — mark recipient failed and fix counters.
+        // First failure — mark recipient failed.
+        // Don't touch total_sent (session-worker never incremented it).
         if (broadcastId && recipientId && priorStatus !== 'failed') {
           void Promise.all([
             adminDb`UPDATE broadcast_recipients SET status = 'failed', error = ${err instanceof Error ? err.message : String(err)} WHERE id = ${recipientId}`,
-            adminDb`UPDATE whatsapp_broadcasts SET total_sent = GREATEST(0, total_sent - 1), total_failed = total_failed + 1, updated_at = NOW() WHERE id = ${broadcastId}`,
-          ]).catch((e: unknown) => workerLogger.warn({ e }, 'Broadcast failure counter update failed'))
+            adminDb`UPDATE whatsapp_broadcasts SET total_failed = total_failed + 1, updated_at = NOW() WHERE id = ${broadcastId}`,
+          ])
+            .then(() => checkBroadcastCompletion({ broadcastId, clientId, sessionId: SESSION_ID }))
+            .catch((e: unknown) => workerLogger.warn({ e }, 'Broadcast failure update failed'))
         }
 
         throw err // re-throw so BullMQ retries
