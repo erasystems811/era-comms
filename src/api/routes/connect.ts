@@ -230,17 +230,22 @@ export const connectAdminRoutes: FastifyPluginAsync = async (app) => {
     if (!assertOperator(req, reply)) return
 
     const q = req.query as {
-      instanceId?: string
-      eventType?:  string
-      status?:     string
-      from?:       string
-      to?:         string
-      limit?:      string
-      offset?:     string
+      instanceId?:  string
+      eventType?:   string
+      status?:      string
+      from?:        string
+      to?:          string
+      hideRoutine?: string
+      limit?:       string
+      offset?:      string
     }
 
-    const limit  = Math.min(parseInt(q.limit  ?? '100', 10), 500)
-    const offset = parseInt(q.offset ?? '0', 10)
+    const limit       = Math.min(parseInt(q.limit  ?? '100', 10), 500)
+    const offset      = parseInt(q.offset ?? '0', 10)
+    const hideRoutine = q.hideRoutine === 'true'
+
+    // Routine events: heartbeat and config polls — excluded by default
+    const ROUTINE_TYPES = ['heartbeat', 'config_fetched', 'config_updated']
 
     const rows = await adminDb<EventRow[]>`
       SELECT e.*, i.hospital_name
@@ -252,6 +257,7 @@ export const connectAdminRoutes: FastifyPluginAsync = async (app) => {
         ${q.status     ? adminDb`AND e.status      = ${q.status}`     : adminDb``}
         ${q.from ? adminDb`AND e.created_at >= ${new Date(q.from)}` : adminDb``}
         ${q.to   ? adminDb`AND e.created_at <= ${new Date(q.to)}`   : adminDb``}
+        ${hideRoutine  ? adminDb`AND e.event_type NOT IN ${adminDb(ROUTINE_TYPES)}` : adminDb``}
       ORDER BY e.created_at DESC
       LIMIT  ${limit} OFFSET ${offset}
     `
@@ -265,6 +271,7 @@ export const connectAdminRoutes: FastifyPluginAsync = async (app) => {
         ${q.status     ? adminDb`AND e.status      = ${q.status}`     : adminDb``}
         ${q.from ? adminDb`AND e.created_at >= ${new Date(q.from)}` : adminDb``}
         ${q.to   ? adminDb`AND e.created_at <= ${new Date(q.to)}`   : adminDb``}
+        ${hideRoutine  ? adminDb`AND e.event_type NOT IN ${adminDb(ROUTINE_TYPES)}` : adminDb``}
     `
 
     return { events: rows.map(mapEvent), total: parseInt(total, 10), limit, offset }
