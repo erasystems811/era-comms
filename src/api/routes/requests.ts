@@ -84,18 +84,21 @@ async function sendWelcomeWhatsApp(opts: {
   email:        string
   tempPassword: string
   portalUrl:    string
-}): Promise<void> {
+}): Promise<{ sent: boolean; note: string }> {
   const { phone, businessName, email, tempPassword, portalUrl } = opts
 
   type SessRow = { id: string }
-  const sessions = await adminDb<SessRow[]>`
+  const sessions = (await adminDb`
     SELECT id FROM whatsapp_sessions
     WHERE  client_id = ${config.monitoring.operatorInternalClientId}
       AND  status    = 'active'
       AND  role      = 'primary'
     LIMIT 1
-  `
-  if (!sessions[0]) return
+  `) as unknown as SessRow[]
+
+  if (!sessions[0]) {
+    return { sent: false, note: 'No active ERA Systems WhatsApp session — connect one under Comms → Sessions' }
+  }
 
   const message =
     `Hello ${businessName},\n\n` +
@@ -105,14 +108,20 @@ async function sendWelcomeWhatsApp(opts: {
     `Password: ${tempPassword}\n\n` +
     `Please change your password after your first login.`
 
-  await sendMessage({
-    clientId:       config.monitoring.operatorInternalClientId,
-    sessionId:      sessions[0].id,
-    to:             phone,
-    content:        message,
-    contentType:    'text',
-    idempotencyKey: `welcome_${email}`,
-  })
+  try {
+    await sendMessage({
+      clientId:       config.monitoring.operatorInternalClientId,
+      sessionId:      sessions[0].id,
+      to:             phone,
+      content:        message,
+      contentType:    'text',
+      idempotencyKey: `welcome_${email}`,
+    })
+    return { sent: true, note: `Sent to ${phone}` }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    return { sent: false, note: msg }
+  }
 }
 
 // ── Plugin ────────────────────────────────────────────────────
@@ -241,29 +250,37 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       ? 'https://era-hub.up.railway.app'
       : 'http://localhost:5173')
 
-    sendEmail(portalAccessEmail({
-      businessName: request.business_name,
-      email:        request.contact_email,
-      portalUrl,
-      tempPassword,
-    })).catch(err => {
-      console.error('Portal access email failed:', err)
-    })
-
-    if (request.contact_phone) {
-      sendWelcomeWhatsApp({
-        phone:        request.contact_phone,
+    const [emailSent, whatsApp] = await Promise.all([
+      sendEmail(portalAccessEmail({
         businessName: request.business_name,
         email:        request.contact_email,
-        tempPassword,
         portalUrl,
-      }).catch(err => {
-        console.error('Welcome WhatsApp failed:', err)
-      })
-    }
+        tempPassword,
+      })).catch(err => {
+        console.error('Portal access email failed:', err)
+        return false
+      }),
+      request.contact_phone
+        ? sendWelcomeWhatsApp({
+            phone:        request.contact_phone,
+            businessName: request.business_name,
+            email:        request.contact_email,
+            tempPassword,
+            portalUrl,
+          }).catch(err => {
+            console.error('Welcome WhatsApp failed:', err)
+            return { sent: false, note: String(err) }
+          })
+        : Promise.resolve({ sent: false, note: 'No phone number on this request' }),
+    ])
 
-    // Return the temp password so the operator can also see it in era-hub
-    return reply.status(201).send({ clientId, tempPassword })
+    return reply.status(201).send({
+      clientId,
+      tempPassword,
+      emailSent:     !!emailSent,
+      whatsappSent:  whatsApp.sent,
+      whatsappNote:  whatsApp.note,
+    })
   })
 
   // ── POST /v1/admin/requests/:id/reject ─────────────────────
