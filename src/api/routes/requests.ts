@@ -21,6 +21,7 @@ import { adminDb } from '../../db/client.js'
 import { config } from '../../shared/config.js'
 import { sendEmail, portalAccessEmail } from '../../shared/email.js'
 import { NotFoundError } from '../../shared/errors.js'
+import { sendMessage } from '../../services/messaging.js'
 
 const scryptAsync = promisify(scrypt)
 
@@ -71,6 +72,47 @@ type TemplateRow = {
   archived: boolean
   created_at: string
   updated_at: string
+}
+
+// ── Welcome WhatsApp ──────────────────────────────────────────
+// Sends login credentials to the business owner's phone number
+// using any active ERA Systems session. Non-fatal if no session exists.
+
+async function sendWelcomeWhatsApp(opts: {
+  phone:        string
+  businessName: string
+  email:        string
+  tempPassword: string
+  portalUrl:    string
+}): Promise<void> {
+  const { phone, businessName, email, tempPassword, portalUrl } = opts
+
+  type SessRow = { id: string }
+  const sessions = await adminDb<SessRow[]>`
+    SELECT id FROM whatsapp_sessions
+    WHERE  client_id = ${config.monitoring.operatorInternalClientId}
+      AND  status    = 'active'
+      AND  role      = 'primary'
+    LIMIT 1
+  `
+  if (!sessions[0]) return
+
+  const message =
+    `Hello ${businessName},\n\n` +
+    `Your ERA Comms business portal is ready.\n\n` +
+    `Login: ${portalUrl}/biz/login\n` +
+    `Email: ${email}\n` +
+    `Password: ${tempPassword}\n\n` +
+    `Please change your password after your first login.`
+
+  await sendMessage({
+    clientId:       config.monitoring.operatorInternalClientId,
+    sessionId:      sessions[0].id,
+    to:             phone,
+    content:        message,
+    contentType:    'text',
+    idempotencyKey: `welcome_${email}`,
+  })
 }
 
 // ── Plugin ────────────────────────────────────────────────────
@@ -194,7 +236,7 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       )
     `
 
-    // Email the business owner their portal access details
+    // Deliver credentials to the business owner via email and WhatsApp
     const portalUrl = process.env.PORTAL_URL ?? (config.isProduction
       ? 'https://era-hub.up.railway.app'
       : 'http://localhost:5173')
@@ -203,12 +245,24 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       businessName: request.business_name,
       email:        request.contact_email,
       portalUrl,
+      tempPassword,
     })).catch(err => {
-      // Non-fatal — operator still gets tempPassword to share manually
       console.error('Portal access email failed:', err)
     })
 
-    // Return the temp password so operator can share it with the business owner
+    if (request.contact_phone) {
+      sendWelcomeWhatsApp({
+        phone:        request.contact_phone,
+        businessName: request.business_name,
+        email:        request.contact_email,
+        tempPassword,
+        portalUrl,
+      }).catch(err => {
+        console.error('Welcome WhatsApp failed:', err)
+      })
+    }
+
+    // Return the temp password so the operator can also see it in era-hub
     return reply.status(201).send({ clientId, tempPassword })
   })
 

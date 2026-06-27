@@ -36,12 +36,13 @@ export function portalAccessEmail(opts: {
   businessName: string
   email: string
   portalUrl: string
+  tempPassword: string
 }): EmailOptions {
-  const { businessName, email, portalUrl } = opts
+  const { businessName, email, portalUrl, tempPassword } = opts
   return {
     to:      email,
     subject: `Your ERA Comms Business Portal is ready`,
-    text:    `Hi ${businessName},\n\nYour ERA Comms account has been approved.\n\nLogin at: ${portalUrl}/biz/login\nEmail: ${email}\n\nContact your ERA Systems representative for your temporary password.\n\nERA Systems`,
+    text:    `Hi ${businessName},\n\nYour ERA Comms account has been approved.\n\nLogin at: ${portalUrl}/biz/login\nEmail: ${email}\nTemporary password: ${tempPassword}\n\nChange your password immediately after your first login.\n\nERA Systems`,
     html: `
 <!DOCTYPE html>
 <html>
@@ -56,14 +57,15 @@ export function portalAccessEmail(opts: {
       <h1 style="font-size:20px;font-weight:700;color:#e2e0ef;margin:0 0 8px">Your business portal is ready</h1>
       <p style="color:#8b8a9b;margin:0 0 24px">Your ERA Comms account for <strong style="color:#e2e0ef">${businessName}</strong> has been approved and is ready to use.</p>
 
-      <div style="background:#1a1729;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px;margin-bottom:24px">
+      <div style="background:#1a1729;border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:20px;margin-bottom:16px">
         <p style="margin:0 0 12px;font-size:13px;color:#8b8a9b;font-weight:600;text-transform:uppercase;letter-spacing:0.1em">Your login details</p>
         <p style="margin:0 0 6px;font-size:14px;color:#e2e0ef"><strong>Portal:</strong> <a href="${portalUrl}/biz/login" style="color:#bf7c93">${portalUrl}/biz/login</a></p>
-        <p style="margin:0;font-size:14px;color:#e2e0ef"><strong>Email:</strong> ${email}</p>
+        <p style="margin:0 0 6px;font-size:14px;color:#e2e0ef"><strong>Email:</strong> ${email}</p>
+        <p style="margin:0;font-size:14px;color:#e2e0ef"><strong>Password:</strong> <span style="font-family:monospace;background:#0f0d17;padding:2px 8px;border-radius:4px;color:#bf7c93">${tempPassword}</span></p>
       </div>
 
       <div style="background:rgba(239,200,100,0.07);border:1px solid rgba(239,200,100,0.15);border-radius:12px;padding:16px;margin-bottom:28px">
-        <p style="margin:0;font-size:13px;color:#d4a430">Your temporary password will be provided by your ERA Systems representative. Change it immediately after first login.</p>
+        <p style="margin:0;font-size:13px;color:#d4a430">Change your password immediately after your first login.</p>
       </div>
 
       <a href="${portalUrl}/biz/login" style="display:inline-block;background:#bf7c93;color:#fff;text-decoration:none;padding:12px 28px;border-radius:10px;font-weight:600;font-size:14px">Open Business Portal</a>
