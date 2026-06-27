@@ -194,9 +194,27 @@ async function start(): Promise<void> {
         }
         if (event.type === 'restart') {
           // WhatsApp 515: exit cleanly so the supervisor restarts this worker.
-          // The QR WebSocket subscription stays alive and will receive the QR
-          // from the new worker instance.
           workerLogger.info('Restarting worker on WhatsApp 515 signal')
+          process.exit(0)
+        }
+        if (event.type === 'logged_out') {
+          // WhatsApp revoked credentials (user logged out from phone, or session expired).
+          // NOT the same as a permanent ban. Credentials are already cleared.
+          // Tell the frontend to expect a new QR, then exit cleanly so the
+          // supervisor restarts this worker and generates a fresh QR.
+          workerLogger.warn('Session logged out by WhatsApp — restarting with fresh QR')
+          logEvent({
+            eventType: 'session_disconnected',
+            severity:  'warning',
+            detail:    `Session ${phoneNumber} was logged out — scan QR to reconnect`,
+            clientId,
+            sessionId: SESSION_ID,
+            metadata:  { phoneNumber, reason: 'logged_out' },
+          }).catch(() => {})
+          await generalRedis.publish(
+            CHANNEL.sessionQR(SESSION_ID),
+            JSON.stringify({ type: 'error', reason: 'WhatsApp logged out this session. A new QR code will appear — please scan to reconnect.' }),
+          )
           process.exit(0)
         }
         await generalRedis.publish(CHANNEL.sessionQR(SESSION_ID), JSON.stringify(event))

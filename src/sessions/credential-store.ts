@@ -113,6 +113,24 @@ export async function clearCredentialCache(sessionId: string): Promise<void> {
   await redis.del(KEY.sessionCreds(sessionId))
 }
 
+// Wipes credentials from both Redis and PostgreSQL so the next connect()
+// call generates a fresh QR. Used when WhatsApp logs out the session
+// (e.g. user tapped "Log out from all devices") so it can be re-paired
+// without needing to delete and recreate the session.
+export async function clearCredentials(sessionId: string): Promise<void> {
+  await Promise.all([
+    redis.del(KEY.sessionCreds(sessionId)),
+    adminDb`
+      UPDATE whatsapp_sessions
+      SET credentials_encrypted  = NULL,
+          credentials_iv         = NULL,
+          credentials_tag        = NULL,
+          credentials_updated_at = NOW()
+      WHERE id = ${sessionId}
+    `,
+  ])
+}
+
 // ── BAILEYS AUTH STATE FACTORY ────────────────────────────────
 //
 // Returns the AuthenticationState object Baileys expects.

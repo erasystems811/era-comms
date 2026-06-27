@@ -15,7 +15,7 @@ import type {
   SendMessageResult,
   QREvent,
 } from '../interfaces/session.js'
-import { makeAuthState, saveCredentials } from './credential-store.js'
+import { makeAuthState, saveCredentials, clearCredentials } from './credential-store.js'
 import { adminDb } from '../db/client.js'
 import { logger } from '../shared/logger.js'
 import { SessionError } from '../shared/errors.js'
@@ -63,7 +63,7 @@ export class BaileysSession implements IWhatsAppSession {
 
   async connect(): Promise<void> {
     if (this._status === 'connected') return
-    if (this._status === 'banned') throw new SessionError('Session is permanently banned')
+    if (this._status === 'banned') throw new SessionError('Session is banned — replace the number')
 
     this._status = 'connecting'
 
@@ -172,7 +172,7 @@ export class BaileysSession implements IWhatsAppSession {
     }
 
     if (this._status === 'banned') {
-      yield { type: 'error', reason: 'Session is permanently banned' }
+      yield { type: 'error', reason: 'This number has been banned by WhatsApp and cannot be reconnected. Please use a different number.' }
       return
     }
 
@@ -185,7 +185,7 @@ export class BaileysSession implements IWhatsAppSession {
       buffer.push(event)
       notifyConsumer?.()
       notifyConsumer = null
-      if (event.type === 'connected' || event.type === 'error') {
+      if (event.type === 'connected' || event.type === 'error' || event.type === 'logged_out' || event.type === 'restart') {
         finished = true
       }
     }
@@ -279,10 +279,19 @@ export class BaileysSession implements IWhatsAppSession {
       const loggedOut = statusCode === DisconnectReason.loggedOut
 
       if (loggedOut) {
-        this._status = 'banned'
-        logger.warn({ sessionId: this.sessionId }, 'WhatsApp session logged out / banned')
-        await this.updateDbStatus('banned')
-        this.emitQR({ type: 'error', reason: 'Session banned or logged out by WhatsApp' })
+        // 401 = WhatsApp revoked this device's credentials.
+        // This happens when the user logs out from their phone, or WhatsApp
+        // invalidates the session — it does NOT necessarily mean the number
+        // is permanently banned. Clear the credentials so the next connect()
+        // call gets a fresh QR, mark disconnected, then signal the worker
+        // to exit cleanly (supervisor will restart with a new QR).
+        logger.warn({ sessionId: this.sessionId }, 'WhatsApp session logged out — clearing credentials, worker will restart with fresh QR')
+        await clearCredentials(this.sessionId).catch((err: unknown) =>
+          logger.error({ err, sessionId: this.sessionId }, 'Failed to clear credentials on logout'),
+        )
+        this._status = 'disconnected'
+        await this.updateDbStatus('disconnected')
+        this.emitQR({ type: 'logged_out' })
       } else if (statusCode === DisconnectReason.restartRequired) {
         // 515 = WhatsApp asking us to reconnect to a different server.
         // Signal the session worker to exit cleanly so the supervisor can

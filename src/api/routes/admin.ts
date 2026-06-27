@@ -10,7 +10,7 @@ import { randomBytes, createHash, randomInt } from 'node:crypto'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { Redis } from 'ioredis'
 import { adminDb } from '../../db/client.js'
-import { clearCredentialCache } from '../../sessions/credential-store.js'
+import { clearCredentialCache, clearCredentials } from '../../sessions/credential-store.js'
 import { redis } from '../../db/redis.js'
 import { KEY, CHANNEL } from '../../queues/definitions.js'
 import { config } from '../../shared/config.js'
@@ -955,16 +955,31 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
   })
 
   // ── POST /v1/admin/sessions/:id/unban ───────────────────────
-  // Reset a spuriously-banned session back to disconnected so it can reconnect.
+  // Reset a banned session back to disconnected, clear credentials, and
+  // restart the worker so a fresh QR is generated immediately.
 
   app.post('/sessions/:id/unban', async (req, reply) => {
     if (!assertOperator(req, reply)) return
     const { id: sessionId } = req.params as { id: string }
+
+    // Kill the existing worker first (it may be stuck in banned state)
+    await req.server.supervisor.stopSession(sessionId).catch(() => {})
+
+    // Wipe credentials so the next start generates a fresh QR
+    await clearCredentials(sessionId)
+
+    // Reset DB status to disconnected
     await adminDb`
       UPDATE whatsapp_sessions
       SET status = 'disconnected', updated_at = NOW()
-      WHERE id = ${sessionId} AND status = 'banned'
+      WHERE id = ${sessionId}
     `
+
+    // Start a new worker — will generate a fresh QR for re-pairing
+    await req.server.supervisor.startSession(sessionId)
+
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'session.unban', target: 'session', targetId: sessionId, detail: 'Session reset from banned — credentials cleared, restarted with fresh QR' }).catch(() => {})
+
     return reply.send({ ok: true })
   })
 
