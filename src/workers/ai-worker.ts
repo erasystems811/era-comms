@@ -5,11 +5,11 @@
 //
 // Per-job flow:
 //   1. Load ai_reply_profile for the client
-//   2. Skip if not found (AI not configured) or ai_active = false on conversation
-//   3. Check escalation triggers in latest inbound message
-//   4. Build message history + system prompt
-//   5. Call AI provider (GPT-4o-mini / GPT-4o / Claude Sonnet)
-//   6. Run content moderation check on AI response
+//   2. Skip if not found or ai_reply toggle is off
+//   3. Skip if conversation is not active (escalated / closed)
+//   4. Check escalation triggers in latest inbound message
+//   5. Build message history + system prompt
+//   6. Call AI provider (GPT-4o-mini or GPT-4o)
 //   7. Send reply via sendMessage()
 //   8. Enqueue analytics event
 
@@ -42,7 +42,6 @@ type AIProfileRow = {
 }
 
 type ConversationRow = {
-  ai_active:  boolean
   status:     string
   session_id: string
 }
@@ -135,14 +134,24 @@ async function processAI(job: { data: AIConversationJob }): Promise<void> {
     return
   }
 
+  // Guard: check the toggle is still on (it may have been disabled after this job was enqueued)
+  type ModRow = { ai_reply: boolean }
+  const modRows = (await adminDb`
+    SELECT ai_reply FROM module_config WHERE client_id = ${clientId}
+  `) as unknown as ModRow[]
+  if (!(modRows[0]?.ai_reply ?? false)) {
+    log.debug({ conversationId, clientId }, 'AI reply is off — skipping')
+    return
+  }
+
   // Load conversation state
   const convRows = (await adminDb`
-    SELECT ai_active, status, session_id FROM conversations WHERE id = ${conversationId}
+    SELECT status, session_id FROM conversations WHERE id = ${conversationId}
   `) as unknown as ConversationRow[]
 
   const conv = convRows[0]
-  if (!conv || !conv.ai_active || conv.status !== 'active') {
-    log.debug({ conversationId, status: conv?.status }, 'AI not active on conversation — skipping')
+  if (!conv || conv.status !== 'active') {
+    log.debug({ conversationId, status: conv?.status }, 'Conversation not active — skipping AI reply')
     return
   }
 

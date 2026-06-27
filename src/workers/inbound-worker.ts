@@ -29,12 +29,11 @@ type WebhookEndpointRow = {
 
 type DeliveryRow = { id: string }
 
-type ConvRow = { id: string; ai_active: boolean; total_turns: string }
+type ConvRow = { id: string; total_turns: string }
 
 type TransactionResult = {
   deliveryIds:      string[]
   convId:           string
-  aiActive:         boolean
   turnCount:        number
   messageInserted:  boolean
 }
@@ -68,33 +67,30 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
 
       const contactId: string = contactRows[0]!.id
 
-      // Find or create active conversation — include ai_active for AI job decision
+      // Find or create active conversation
       const convRows = (await tx`
-        SELECT id, ai_active, total_turns FROM conversations
+        SELECT id, total_turns FROM conversations
         WHERE  contact_id = ${contactId}
           AND  session_id = ${msg.sessionId}
           AND  status     = 'active'
         ORDER BY created_at DESC LIMIT 1
       `) as unknown as ConvRow[]
 
-      let convId:   string
-      let aiActive: boolean
+      let convId: string
 
       if (convRows[0]) {
-        convId   = convRows[0].id
-        aiActive = convRows[0].ai_active
+        convId = convRows[0].id
       } else {
         const newConv = (await tx`
           INSERT INTO conversations (
-            client_id, contact_id, session_id, profile_version_id, status, ai_active
+            client_id, contact_id, session_id, profile_version_id, status
           ) VALUES (
             ${msg.clientId}, ${contactId}, ${msg.sessionId}, ${profileVersionId},
-            'active', FALSE
+            'active'
           )
-          RETURNING id, ai_active, total_turns
+          RETURNING id, total_turns
         `) as unknown as ConvRow[]
-        convId   = newConv[0]!.id
-        aiActive = newConv[0]!.ai_active
+        convId = newConv[0]!.id
       }
 
       // Insert message — RETURNING id lets us detect ON CONFLICT DO NOTHING
@@ -162,10 +158,10 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
         }
       }
 
-      return { deliveryIds, convId, aiActive, turnCount, messageInserted }
+      return { deliveryIds, convId, turnCount, messageInserted }
     })
 
-    const { deliveryIds, convId, aiActive, turnCount, messageInserted } = txResult
+    const { deliveryIds, convId, turnCount, messageInserted } = txResult
 
     if (messageInserted) {
       messagesInboundTotal.inc({ session_id: msg.sessionId })
@@ -250,11 +246,8 @@ export function startInboundWorker(): Worker<InboundMessageJob> {
       )
     }
 
-    // Enqueue AI job only when:
-    // 1. Message was new (not a duplicate)
-    // 2. The conversation has ai_active = TRUE (set when business enables AI reply)
-    // 3. The client has ai_reply enabled in their module_config
-    if (messageInserted && aiActive) {
+    // Enqueue AI job when the message is new and the client has AI reply turned on.
+    if (messageInserted) {
       type ModRow = { ai_reply: boolean }
       const modRows = (await adminDb`
         SELECT ai_reply FROM module_config WHERE client_id = ${msg.clientId}
