@@ -1,25 +1,8 @@
-import nodemailer from 'nodemailer'
+import { postalSend } from '../services/postal.js'
 import { config } from './config.js'
 import { logger } from './logger.js'
 
 const log = logger.child({ component: 'email' })
-
-let transport: nodemailer.Transporter | null = null
-
-function getTransport(): nodemailer.Transporter | null {
-  const { smtpHost, smtpPort, smtpUser, smtpPass } = config.email
-  if (!smtpHost || !smtpUser || !smtpPass) return null
-  if (!transport) {
-    transport = nodemailer.createTransport({
-      host: smtpHost,
-      port: smtpPort,
-      secure: smtpPort === 465,
-      auth: { user: smtpUser, pass: smtpPass },
-      tls: { rejectUnauthorized: false },
-    })
-  }
-  return transport
-}
 
 export interface EmailOptions {
   to: string
@@ -29,26 +12,22 @@ export interface EmailOptions {
 }
 
 export async function sendEmail(opts: EmailOptions): Promise<boolean> {
-  const t = getTransport()
-  if (!t) {
-    log.warn({ to: opts.to, subject: opts.subject }, 'Email skipped — SMTP not configured (set SMTP_HOST, SMTP_USER, SMTP_PASS)')
+  const result = await postalSend({
+    to:       [opts.to],
+    from:     `ERA Systems <${config.email.from}>`,
+    subject:  opts.subject,
+    htmlBody: opts.html,
+    textBody: opts.text,
+    tag:      'transactional',
+  })
+
+  if (!result) {
+    log.warn({ to: opts.to, subject: opts.subject }, 'Transactional email skipped — Postal not configured or send failed')
     return false
   }
 
-  try {
-    await t.sendMail({
-      from: `ERA Systems <${config.email.from}>`,
-      to:   opts.to,
-      subject: opts.subject,
-      html: opts.html,
-      text: opts.text,
-    })
-    log.info({ to: opts.to, subject: opts.subject }, 'Email sent')
-    return true
-  } catch (err) {
-    log.error({ err, to: opts.to }, 'Email send failed')
-    return false
-  }
+  log.info({ to: opts.to, subject: opts.subject, messageId: result.messageId }, 'Transactional email sent via Postal')
+  return true
 }
 
 // ── Pre-built templates ───────────────────────────────────────
