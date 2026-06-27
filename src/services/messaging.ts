@@ -121,8 +121,7 @@ export interface SendMessageOptions {
   contentType?: 'text' | 'image' | 'audio' | 'video' | 'document'
   conversationId?: string  // Pin to existing conversation, or find/create
   idempotencyKey?: string  // Client-supplied. Auto-generated if omitted.
-  aiGenerated?: boolean    // true for AI-authored replies — skips variation in worker
-  skipJitter?: boolean     // true for operator test sends — skip composing/delay
+  aiGenerated?: boolean    // true for AI-authored replies
 }
 
 export interface SendMessageResult {
@@ -142,7 +141,6 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
     conversationId: requestedConvId,
     idempotencyKey,
     aiGenerated  = false,
-    skipJitter   = false,
   } = opts
 
   const ikey = idempotencyKey ?? randomUUID()
@@ -270,7 +268,6 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
         contentType,
         conversationId: result.conversationId,
         aiGenerated,
-        skipJitter,
       },
       {
         removeOnComplete: true,

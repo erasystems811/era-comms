@@ -1014,7 +1014,6 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       to,
       content,
       contentType: 'text',
-      skipJitter:  true,
     })
 
     auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'message.test_sent', target: 'session', targetId: sessionId, detail: `Test message sent to ${to}` }).catch(() => {})

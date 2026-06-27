@@ -51,10 +51,7 @@ export interface OutboundMessageJob {
   contentType: 'text' | 'image' | 'audio' | 'video' | 'document'
   mediaUrl?: string
   conversationId: string
-  // Anti-detection — worker resolves warmup stage from DB at process time;
-  // aiGenerated skips variation (model output is already diverse).
   aiGenerated: boolean
-  skipJitter?: boolean  // true for operator test messages — skip composing/delay so result is instant
 }
 
 export interface InboundMessageJob {

@@ -13,9 +13,7 @@ import { redis as generalRedis } from '../db/redis.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import { BaileysSession } from './baileys-session.js'
-import { calculateJitter } from '../anti-detection/jitter.js'
 import { checkWarmup, incrementDailyCount } from '../anti-detection/warmup.js'
-import { varyMessage } from '../anti-detection/variation.js'
 import { updateRiskScore } from '../anti-detection/risk.js'
 import { recordMessageSent } from '../services/plan.js'
 import { logEvent } from '../services/events.js'
@@ -35,9 +33,6 @@ import type {
 } from '../queues/definitions.js'
 import type { InboundMessage } from '../interfaces/session.js'
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
 
 // argv[2] is string | undefined due to noUncheckedIndexedAccess.
 // Guard early and re-declare as string so TypeScript propagates the
@@ -241,154 +236,72 @@ async function start(): Promise<void> {
   await generalRedis.setex(KEY.sessionHeartbeat(SESSION_ID), HEARTBEAT_TTL_SECONDS, '1')
 
   // ── OUTBOUND QUEUE WORKER ─────────────────────────────────────
-  //
-  // concurrency: 1 — one message at a time per session.
-  // Simultaneous sends from the same number look automated.
 
   const outboundWorker = new Worker<OutboundMessageJob>(
     QUEUE.outbound(SESSION_ID),
     async (job) => {
-      const messageId:    string  = job.data.messageId
-      const to:           string  = job.data.to
-      const content:      string  = job.data.content
-      const contentType:  string  = job.data.contentType
-      const aiGenerated:  boolean = job.data.aiGenerated
-      const skipJitter:   boolean = job.data.skipJitter ?? false
+      const messageId = job.data.messageId
+      const to        = job.data.to
+      const content   = job.data.content
 
       workerLogger.debug({ messageId, to }, 'Processing outbound message')
 
-      // ── 0. CONNECTION CHECK ─────────────────────────────────
-      // If not connected, fail immediately so BullMQ retries with backoff.
-      // Do not block the worker thread waiting — other sessions need it.
+      // If not connected, throw so BullMQ retries with backoff.
       if (session.getStatus() !== 'connected') {
         throw new Error(`Session not connected (status: ${session.getStatus()}) — will retry`)
       }
 
-      // ── 1. WARMUP CAP CHECK ─────────────────────────────────
-      //
-      // Resolve the current warmup stage and enforce the daily cap.
-      // If the cap is exceeded, mark the message failed without
-      // retrying — the cap is deterministic for the rest of the day.
-
-      const warmup = await checkWarmup(SESSION_ID)
-
-      if (!warmup.allowed) {
-        workerLogger.warn(
-          { messageId, sentToday: warmup.sentToday, cap: warmup.cap },
-          'Warmup daily cap reached — message failed',
-        )
-        await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
-        logEvent({
-          eventType: 'message_failed',
-          severity:  'warning',
-          detail:    `Message blocked — daily warmup cap reached (${warmup.sentToday}/${warmup.cap})`,
-          clientId,
-          sessionId: SESSION_ID,
-          metadata:  { messageId, to, sentToday: warmup.sentToday, cap: warmup.cap },
-        }).catch((err: unknown) => workerLogger.error({ err }, 'message_failed event write failed'))
-        return // no throw — BullMQ treats this as success; no retry
-      }
-
-      // ── 2. MESSAGE VARIATION ────────────────────────────────
-      //
-      // Only text messages authored by humans are varied.
-      // Falls back to original on any AI error (never blocks delivery).
-
-      let finalContent   = content
-      let wasVaried      = false
-
-      if (contentType === 'text') {
-        const varied = await varyMessage(content, warmup.stage, aiGenerated)
-        finalContent = varied.content
-        wasVaried    = varied.wasVaried
-      }
-
-      // ── 3. JITTER + COMPOSING ───────────────────────────────
-      //
-      // Show a "typing…" indicator for a human-realistic duration,
-      // then pause before actually sending.
-
-      if (!skipJitter) {
-        const jitter = calculateJitter(warmup.stage, finalContent.length)
-        try {
-          await session.sendComposing(to, jitter.composingMs)
-        } catch {
-          // Composing is best-effort — proceed without it
-        }
-        await delay(jitter.delayMs)
-      }
-
-      // ── 4. SEND ─────────────────────────────────────────────
-
-      // Look up idempotency_key and prior status once — used in both success and failure paths
-      // to detect broadcast messages and avoid double-counting on retries.
+      // Look up idempotency_key and prior status to detect broadcast messages
+      // and avoid double-counting on retries.
       type MsgRow = { idempotency_key: string | null; status: string }
       const msgMeta = (await adminDb`
         SELECT idempotency_key, status FROM messages WHERE id = ${messageId}
       `) as unknown as MsgRow[]
-      const ikey       = msgMeta[0]?.idempotency_key ?? null
+      const ikey        = msgMeta[0]?.idempotency_key ?? null
       const priorStatus = msgMeta[0]?.status ?? 'queued'
 
-      // Detect broadcast messages: idempotency key is "broadcast_<broadcastId>_<recipientId>"
       const broadcastMatch = ikey?.match(
         /^broadcast_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/,
       )
-      const broadcastId  = broadcastMatch?.[1] ?? null
-      const recipientId  = broadcastMatch?.[2] ?? null
+      const broadcastId = broadcastMatch?.[1] ?? null
+      const recipientId = broadcastMatch?.[2] ?? null
 
       try {
-        const result = await session.sendMessage(to, finalContent)
+        const result = await session.sendMessage(to, content)
 
-        // Increment warmup counter and plan usage counters after confirmed send
         await incrementDailyCount(SESSION_ID)
         await recordMessageSent(clientId)
 
-        await logEvent({
+        logEvent({
           eventType: 'message_sent',
           severity:  'info',
           detail:    `Message sent to ${to}`,
           clientId,
           sessionId: SESSION_ID,
-          metadata:  { messageId, to, waMessageId: result.waMessageId, wasVaried, warmupStage: warmup.stage },
+          metadata:  { messageId, to, waMessageId: result.waMessageId },
         }).catch((err: unknown) => workerLogger.error({ err }, 'message_sent event write failed'))
 
         await adminDb`
           UPDATE messages
-          SET wa_message_id    = ${result.waMessageId},
-              status           = 'sent',
-              sent_at          = NOW(),
-              was_varied       = ${wasVaried},
-              original_content = ${wasVaried ? content : null},
-              warmup_stage     = ${warmup.stage}
+          SET wa_message_id = ${result.waMessageId},
+              status        = 'sent',
+              sent_at       = NOW()
           WHERE id = ${messageId}
         `
 
-        // If this was a broadcast message that previously failed (retry succeeded),
-        // flip the recipient back to sent and fix the broadcast counters.
+        // Broadcast retry succeeded — restore recipient to sent and fix counters.
         if (broadcastId && recipientId && priorStatus === 'failed') {
           void Promise.all([
-            adminDb`
-              UPDATE broadcast_recipients SET status = 'sent', sent_at = NOW(), error = NULL
-              WHERE id = ${recipientId}
-            `,
-            adminDb`
-              UPDATE whatsapp_broadcasts
-              SET total_sent   = total_sent + 1,
-                  total_failed = GREATEST(0, total_failed - 1),
-                  updated_at   = NOW()
-              WHERE id = ${broadcastId}
-            `,
+            adminDb`UPDATE broadcast_recipients SET status = 'sent', sent_at = NOW(), error = NULL WHERE id = ${recipientId}`,
+            adminDb`UPDATE whatsapp_broadcasts SET total_sent = total_sent + 1, total_failed = GREATEST(0, total_failed - 1), updated_at = NOW() WHERE id = ${broadcastId}`,
           ]).catch((err: unknown) => workerLogger.warn({ err }, 'Broadcast retry-success counter fix failed'))
         }
 
-        // Write usage event directly — session worker is a child process
-        // and does not participate in the main-process BullMQ analytics queue.
         void adminDb`
           INSERT INTO usage_events (client_id, event_type, quantity, reference_id, occurred_at)
           VALUES (${clientId}, 'message_sent', 1, ${messageId}::uuid, NOW())
         `.catch((err: unknown) => workerLogger.warn({ err }, 'Usage event write failed'))
 
-        // Risk score update is fire-and-forget — never block delivery
         void updateRiskScore(SESSION_ID).catch((err: unknown) =>
           workerLogger.warn({ err }, 'Risk score update failed'),
         )
@@ -405,32 +318,20 @@ async function start(): Promise<void> {
           metadata:  { messageId, to, error: String(err), broadcastId, recipientId },
         }).catch((e: unknown) => workerLogger.error({ e }, 'message_failed event write failed'))
 
-        // For broadcast messages: on first failure, move recipient to 'failed' and
-        // adjust counters. Subsequent retries don't double-count (priorStatus already 'failed').
+        // First broadcast failure — mark recipient failed and fix counters.
         if (broadcastId && recipientId && priorStatus !== 'failed') {
           void Promise.all([
-            adminDb`
-              UPDATE broadcast_recipients
-              SET status = 'failed', error = ${err instanceof Error ? err.message : String(err)}
-              WHERE id = ${recipientId}
-            `,
-            adminDb`
-              UPDATE whatsapp_broadcasts
-              SET total_sent   = GREATEST(0, total_sent - 1),
-                  total_failed = total_failed + 1,
-                  updated_at   = NOW()
-              WHERE id = ${broadcastId}
-            `,
+            adminDb`UPDATE broadcast_recipients SET status = 'failed', error = ${err instanceof Error ? err.message : String(err)} WHERE id = ${recipientId}`,
+            adminDb`UPDATE whatsapp_broadcasts SET total_sent = GREATEST(0, total_sent - 1), total_failed = total_failed + 1, updated_at = NOW() WHERE id = ${broadcastId}`,
           ]).catch((e: unknown) => workerLogger.warn({ e }, 'Broadcast failure counter update failed'))
         }
 
-        throw err // re-throw so BullMQ applies retry policy
+        throw err // re-throw so BullMQ retries
       }
     },
     {
-      connection: { url: config.redis.url },
-      concurrency: 1,
-      limiter: { max: 10, duration: 60_000 },
+      connection:  { url: config.redis.url },
+      concurrency: 5,
     },
   )
 
