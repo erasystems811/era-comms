@@ -51,6 +51,8 @@ type ConfigRow = {
   sync_interval_seconds: number
   paused: boolean
   notify_email: string | null
+  pending_restart: boolean
+  sandbox_inject: Record<string, unknown> | null
   updated_at: string
 }
 
@@ -294,6 +296,62 @@ export const connectAdminRoutes: FastifyPluginAsync = async (app) => {
     return { version: row!.version, downloadUrl: row!.download_url, updatedAt: row!.updated_at }
   })
 
+  // POST /instances/:id/sandbox/inject-patient
+  app.post('/instances/:id/sandbox/inject-patient', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id } = req.params as { id: string }
+    const body = req.body as {
+      firstName?: string
+      lastName?: string
+      phone?: string
+      dateOfBirth?: string
+    }
+    const payload = {
+      type:         'patient',
+      firstName:    (body.firstName  ?? 'Test').trim(),
+      lastName:     (body.lastName   ?? 'Patient').trim(),
+      phone:        (body.phone      ?? '').trim(),
+      dateOfBirth:  body.dateOfBirth ?? null,
+    }
+    const result = await adminDb`
+      UPDATE connect_configs SET sandbox_inject = ${adminDb.json(payload)}, updated_at = NOW()
+      WHERE instance_id = ${id}
+    `
+    if (result.count === 0) {
+      return reply.status(404).send({ error: 'NOT_FOUND', message: 'Instance not found' })
+    }
+    return { ok: true }
+  })
+
+  // POST /instances/:id/sandbox/inject-treatment
+  app.post('/instances/:id/sandbox/inject-treatment', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { id } = req.params as { id: string }
+    const body = req.body as {
+      medication?: string
+      dosage?: string
+      timing?: string
+      duration?: string
+      doctorName?: string
+    }
+    const payload = {
+      type:       'treatment',
+      medication: (body.medication ?? 'Paracetamol').trim(),
+      dosage:     (body.dosage     ?? '500mg').trim(),
+      timing:     (body.timing     ?? 'Twice daily').trim(),
+      duration:   (body.duration   ?? '3 days').trim(),
+      doctorName: (body.doctorName ?? 'Dr. Test').trim(),
+    }
+    const result = await adminDb`
+      UPDATE connect_configs SET sandbox_inject = ${adminDb.json(payload)}, updated_at = NOW()
+      WHERE instance_id = ${id}
+    `
+    if (result.count === 0) {
+      return reply.status(404).send({ error: 'NOT_FOUND', message: 'Instance not found' })
+    }
+    return { ok: true }
+  })
+
   // POST /instances/:id/restart
   app.post('/instances/:id/restart', async (req, reply) => {
     if (!assertOperator(req, reply)) return
@@ -500,19 +558,24 @@ export const connectAgentRoutes: FastifyPluginAsync = async (app) => {
       SELECT * FROM connect_configs WHERE instance_id = ${instance.id}
     `
 
-    if (!cfg) return { syncIntervalSeconds: 30, paused: false, pendingRestart: false, notifyEmail: null }
+    if (!cfg) return { syncIntervalSeconds: 30, paused: false, pendingRestart: false, sandboxInject: null }
 
-    // If a restart is pending, return it once and immediately clear it so the
-    // exe doesn't restart on every subsequent config poll.
-    if ((cfg as ConfigRow & { pending_restart?: boolean }).pending_restart) {
+    // One-shot delivery: clear pending_restart and sandbox_inject immediately
+    // so they don't fire again on the next config poll.
+    if (cfg.pending_restart || cfg.sandbox_inject) {
       await adminDb`
-        UPDATE connect_configs SET pending_restart = FALSE WHERE instance_id = ${instance.id}
+        UPDATE connect_configs
+        SET
+          pending_restart = FALSE,
+          sandbox_inject  = NULL
+        WHERE instance_id = ${instance.id}
       `
     }
 
     return {
       ...mapConfig(cfg),
-      pendingRestart: !!(cfg as ConfigRow & { pending_restart?: boolean }).pending_restart,
+      pendingRestart: !!cfg.pending_restart,
+      sandboxInject:  cfg.sandbox_inject ?? null,
     }
   })
 }

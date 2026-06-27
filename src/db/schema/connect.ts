@@ -34,6 +34,7 @@ export type ConnectEventType =
   | 'db_error'
   | 'config_fetched'
   | 'config_updated'
+  | 'sandbox_injected'
 
 export type ConnectEventStatus = 'ok' | 'error' | 'warning'
 
