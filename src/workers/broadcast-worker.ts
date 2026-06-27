@@ -9,6 +9,7 @@ import { adminDb } from '../db/client.js'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 import { sendMessage } from '../services/messaging.js'
+import { logEvent } from '../services/events.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { BroadcastRecipientJob } from '../queues/definitions.js'
 
@@ -55,15 +56,30 @@ async function processRecipient(job: { data: BroadcastRecipientJob }): Promise<v
       SET total_failed = total_failed + 1, updated_at = NOW()
       WHERE id = ${broadcastId}
     `
+
+    logEvent({
+      eventType: 'message_failed',
+      severity:  'critical',
+      detail:    `Broadcast message could not be queued for ${to}: ${errorMsg}`,
+      clientId,
+      sessionId,
+      metadata:  { broadcastId, recipientId, to, error: errorMsg },
+    }).catch((e: unknown) => log.error({ e }, 'broadcast queue-failure event write failed'))
     // Don't re-throw — one failed recipient should not block the rest
   }
 
   // Check if broadcast is complete (all recipients processed)
-  type CountRow = { pending: string }
+  type CountRow = { pending: string; name: string; total_sent: string; total_failed: string }
   const counts = (await adminDb`
-    SELECT COUNT(*) FILTER (WHERE status = 'pending')::text AS pending
-    FROM   broadcast_recipients
-    WHERE  broadcast_id = ${broadcastId}
+    SELECT
+      COUNT(*) FILTER (WHERE br.status = 'pending')::text AS pending,
+      wb.name,
+      wb.total_sent::text,
+      wb.total_failed::text
+    FROM broadcast_recipients br
+    JOIN whatsapp_broadcasts wb ON wb.id = br.broadcast_id
+    WHERE br.broadcast_id = ${broadcastId}
+    GROUP BY wb.name, wb.total_sent, wb.total_failed
   `) as unknown as CountRow[]
 
   if (parseInt(counts[0]?.pending ?? '1', 10) === 0) {
@@ -73,6 +89,18 @@ async function processRecipient(job: { data: BroadcastRecipientJob }): Promise<v
       WHERE id = ${broadcastId} AND status = 'sending'
     `
     log.info({ broadcastId }, 'Broadcast completed')
+
+    const sent   = parseInt(counts[0]?.total_sent   ?? '0', 10)
+    const failed = parseInt(counts[0]?.total_failed ?? '0', 10)
+    const name   = counts[0]?.name ?? 'Broadcast'
+    logEvent({
+      eventType: 'broadcast_completed',
+      severity:  failed > 0 ? 'warning' : 'info',
+      detail:    `Broadcast "${name}" completed: ${sent} queued, ${failed} failed`,
+      clientId,
+      sessionId,
+      metadata:  { broadcastId, totalSent: sent, totalFailed: failed },
+    }).catch((e: unknown) => log.error({ e }, 'broadcast_completed event write failed'))
   }
 }
 

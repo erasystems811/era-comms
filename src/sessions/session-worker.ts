@@ -302,6 +302,22 @@ async function start(): Promise<void> {
 
       // ── 4. SEND ─────────────────────────────────────────────
 
+      // Look up idempotency_key and prior status once — used in both success and failure paths
+      // to detect broadcast messages and avoid double-counting on retries.
+      type MsgRow = { idempotency_key: string | null; status: string }
+      const msgMeta = (await adminDb`
+        SELECT idempotency_key, status FROM messages WHERE id = ${messageId}
+      `) as unknown as MsgRow[]
+      const ikey       = msgMeta[0]?.idempotency_key ?? null
+      const priorStatus = msgMeta[0]?.status ?? 'queued'
+
+      // Detect broadcast messages: idempotency key is "broadcast_<broadcastId>_<recipientId>"
+      const broadcastMatch = ikey?.match(
+        /^broadcast_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/,
+      )
+      const broadcastId  = broadcastMatch?.[1] ?? null
+      const recipientId  = broadcastMatch?.[2] ?? null
+
       try {
         const result = await session.sendMessage(to, finalContent)
 
@@ -329,6 +345,24 @@ async function start(): Promise<void> {
           WHERE id = ${messageId}
         `
 
+        // If this was a broadcast message that previously failed (retry succeeded),
+        // flip the recipient back to sent and fix the broadcast counters.
+        if (broadcastId && recipientId && priorStatus === 'failed') {
+          void Promise.all([
+            adminDb`
+              UPDATE broadcast_recipients SET status = 'sent', sent_at = NOW(), error = NULL
+              WHERE id = ${recipientId}
+            `,
+            adminDb`
+              UPDATE whatsapp_broadcasts
+              SET total_sent   = total_sent + 1,
+                  total_failed = GREATEST(0, total_failed - 1),
+                  updated_at   = NOW()
+              WHERE id = ${broadcastId}
+            `,
+          ]).catch((err: unknown) => workerLogger.warn({ err }, 'Broadcast retry-success counter fix failed'))
+        }
+
         // Write usage event directly — session worker is a child process
         // and does not participate in the main-process BullMQ analytics queue.
         void adminDb`
@@ -343,14 +377,35 @@ async function start(): Promise<void> {
       } catch (err) {
         workerLogger.error({ messageId, err }, 'Failed to send message')
         await adminDb`UPDATE messages SET status = 'failed' WHERE id = ${messageId}`
+
         logEvent({
           eventType: 'message_failed',
           severity:  'critical',
           detail:    `Failed to send message to ${to}: ${err instanceof Error ? err.message : String(err)}`,
           clientId,
           sessionId: SESSION_ID,
-          metadata:  { messageId, to, error: String(err) },
+          metadata:  { messageId, to, error: String(err), broadcastId, recipientId },
         }).catch((e: unknown) => workerLogger.error({ e }, 'message_failed event write failed'))
+
+        // For broadcast messages: on first failure, move recipient to 'failed' and
+        // adjust counters. Subsequent retries don't double-count (priorStatus already 'failed').
+        if (broadcastId && recipientId && priorStatus !== 'failed') {
+          void Promise.all([
+            adminDb`
+              UPDATE broadcast_recipients
+              SET status = 'failed', error = ${err instanceof Error ? err.message : String(err)}
+              WHERE id = ${recipientId}
+            `,
+            adminDb`
+              UPDATE whatsapp_broadcasts
+              SET total_sent   = GREATEST(0, total_sent - 1),
+                  total_failed = total_failed + 1,
+                  updated_at   = NOW()
+              WHERE id = ${broadcastId}
+            `,
+          ]).catch((e: unknown) => workerLogger.warn({ e }, 'Broadcast failure counter update failed'))
+        }
+
         throw err // re-throw so BullMQ applies retry policy
       }
     },

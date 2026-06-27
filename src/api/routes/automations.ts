@@ -8,6 +8,8 @@ import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { adminDb } from '../../db/client.js'
 import { config } from '../../shared/config.js'
 import { randomBytes } from 'node:crypto'
+import { auditLog } from '../../services/audit.js'
+import { logEvent } from '../../services/events.js'
 
 const E164_RE = /^\+[1-9]\d{6,14}$/
 
@@ -99,6 +101,7 @@ const automationRoutes: FastifyPluginAsync = async (app) => {
       `
     }
 
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'automation.created', target: 'automation_flow', targetId: flowId, detail: `Created automation flow "${body.name.trim()}" for client ${body.clientId}` }).catch(() => {})
     return reply.status(201).send({ id: flowId, triggerKey, createdAt: rows[0]!.created_at })
   })
 
@@ -172,6 +175,9 @@ const automationRoutes: FastifyPluginAsync = async (app) => {
         updated_at  = NOW()
       WHERE id = ${id}
     `
+    const action = body.status === 'paused' ? 'automation.paused' : body.status === 'active' ? 'automation.resumed' : 'automation.updated'
+    const detail = body.status ? `Flow status changed to ${body.status}` : `Flow updated${body.name ? ` — renamed to "${body.name}"` : ''}`
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action, target: 'automation_flow', targetId: id, detail }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -181,6 +187,7 @@ const automationRoutes: FastifyPluginAsync = async (app) => {
     if (!assertOperator(req, reply)) return
     const { id } = req.params as { id: string }
     await adminDb`UPDATE automation_flows SET status = 'archived', updated_at = NOW() WHERE id = ${id}`
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'automation.archived', target: 'automation_flow', targetId: id, detail: 'Automation flow archived' }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -218,6 +225,11 @@ const automationRoutes: FastifyPluginAsync = async (app) => {
     await adminDb`
       UPDATE automation_flows SET total_enrolled = total_enrolled + ${enrolled}, updated_at = NOW() WHERE id = ${id}
     `
+
+    if (enrolled > 0) {
+      auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'automation.contact_enrolled', target: 'automation_flow', targetId: id, detail: `${enrolled} contact(s) enrolled in automation flow` }).catch(() => {})
+      logEvent({ eventType: 'automation_triggered', severity: 'info', detail: `${enrolled} contact(s) enrolled in automation flow`, clientId }).catch(() => {})
+    }
 
     return reply.send({ enrolled })
   })

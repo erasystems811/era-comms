@@ -19,6 +19,8 @@ import { invalidatePlanCache } from '../../services/plan.js'
 import { sendMessage } from '../../services/messaging.js'
 import { sendEmail, portalAccessEmail, apiKeyEmail } from '../../shared/email.js'
 import { NotFoundError, ConflictError } from '../../shared/errors.js'
+import { auditLog } from '../../services/audit.js'
+import { logEvent } from '../../services/events.js'
 import { sendSessionCommand } from '../../sessions/supervisor.js'
 import requestsRoutes from './requests.js'
 import observabilityRoutes from './observability.js'
@@ -155,8 +157,11 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
         RETURNING id
       `) as unknown as PlanInsert[]
 
+      const planId = rows[0]!.id
+      auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'plan.created', target: 'plan', targetId: planId, detail: `Created plan "${body.displayName.trim()}"` }).catch(() => {})
+
       return reply.status(201).send({
-        id: rows[0]!.id, name,
+        id: planId, name,
         displayName: body.displayName.trim(),
         aiEnabled: body.aiEnabled ?? true,
         voiceEnabled: body.voiceEnabled ?? false,
@@ -213,6 +218,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       WHERE id = ${id}
     `
 
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'plan.updated', target: 'plan', targetId: id, detail: `Updated plan "${body.displayName}"` }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -238,6 +244,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     }
 
     await adminDb`DELETE FROM plans WHERE id = ${id}`
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'plan.deleted', target: 'plan', targetId: id, detail: 'Deleted plan' }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -282,6 +289,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     `) as unknown as InsertRow[]
 
     const row = rows[0]!
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.created', target: 'client', targetId: row.id, detail: `Created business "${body.name.trim()}"` }).catch(() => {})
+    logEvent({ eventType: 'business_created', severity: 'info', detail: `Business "${body.name.trim()}" created`, clientId: row.id }).catch(() => {})
     return reply.status(201).send({ id: row.id, name: body.name.trim(), type, createdAt: row.created_at })
   })
 
@@ -466,20 +475,28 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (body.planId) {
       await adminDb`UPDATE clients SET plan_id = ${body.planId}, updated_at = NOW() WHERE id = ${id}`
       await invalidatePlanCache(id)
+      auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.plan_changed', target: 'client', targetId: id, detail: `Changed plan to ${body.planId}` }).catch(() => {})
     }
     const newStatus = body.status
       ?? (body.active !== undefined ? (body.active ? 'active' : 'suspended') : undefined)
     if (newStatus) {
       await adminDb`UPDATE clients SET status = ${newStatus}, updated_at = NOW() WHERE id = ${id}`
+      auditLog({ actor: 'operator', actorLabel: 'Operator', action: `client.${newStatus === 'suspended' ? 'suspended' : 'status_changed'}`, target: 'client', targetId: id, detail: `Status changed to ${newStatus}` }).catch(() => {})
+      if (newStatus === 'suspended') {
+        logEvent({ eventType: 'business_suspended', severity: 'warning', detail: 'Business suspended by operator', clientId: id }).catch(() => {})
+      }
     }
     if (body.name?.trim()) {
       await adminDb`UPDATE clients SET name = ${body.name.trim()}, updated_at = NOW() WHERE id = ${id}`
+      auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.updated', target: 'client', targetId: id, detail: `Name updated to "${body.name.trim()}"` }).catch(() => {})
     }
     if (body.contactEmail !== undefined) {
       await adminDb`UPDATE clients SET contact_email = ${body.contactEmail}, updated_at = NOW() WHERE id = ${id}`
+      auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.updated', target: 'client', targetId: id, detail: 'Contact email updated' }).catch(() => {})
     }
     if (body.contactPhone !== undefined) {
       await adminDb`UPDATE clients SET contact_phone = ${body.contactPhone}, updated_at = NOW() WHERE id = ${id}`
+      auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.updated', target: 'client', targetId: id, detail: 'Contact phone updated' }).catch(() => {})
     }
 
     return reply.status(204).send()
@@ -495,6 +512,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!rows[0]) throw new NotFoundError('Client')
 
     await adminDb`DELETE FROM clients WHERE id = ${id}`
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.deleted', target: 'client', targetId: id, detail: 'Business deleted' }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -537,6 +555,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     `) as unknown as KeyInsertRow[]
 
     const row = rows[0]!
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'api_key.created', target: 'api_key', targetId: row.id, detail: `Created API key "${label || environment}" for client ${clientId}` }).catch(() => {})
+    logEvent({ eventType: 'api_key_generated', severity: 'info', detail: `API key "${label || environment}" generated`, clientId }).catch(() => {})
     return reply.status(201).send({
       id:        row.id,
       key:       rawKey,
@@ -589,6 +609,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     if (!rows[0]) throw new NotFoundError('API key')
 
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'api_key.revoked', target: 'api_key', targetId: keyId, detail: 'API key revoked' }).catch(() => {})
+    logEvent({ eventType: 'api_key_revoked', severity: 'warning', detail: 'API key revoked by operator' }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -768,6 +790,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
 
     await req.server.supervisor.startSession(sessionId)
 
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'session.created', target: 'session', targetId: sessionId, detail: `Created session ${phoneNumber} for client ${body.clientId}` }).catch(() => {})
+    logEvent({ eventType: 'session_created', severity: 'info', detail: `Session created for ${phoneNumber}`, clientId: body.clientId, sessionId }).catch(() => {})
     return reply.status(201).send({ id: sessionId, phoneNumber, role, status: 'pending_qr' })
   })
 
@@ -888,6 +912,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     if (!rows[0]) throw new NotFoundError('Session')
 
     await req.server.supervisor.stopSession(id)
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'session.deleted', target: 'session', targetId: id, detail: 'Session stopped and deleted by operator' }).catch(() => {})
+    logEvent({ eventType: 'session_deleted', severity: 'info', detail: 'Session deleted by operator', sessionId: id }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -976,6 +1002,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       skipJitter:  true,
     })
 
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'message.test_sent', target: 'session', targetId: sessionId, detail: `Test message sent to ${to}` }).catch(() => {})
     return reply.send({ ok: true, messageId: result.messageId })
   })
 
@@ -1481,13 +1508,16 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       ON CONFLICT (keyword) DO UPDATE SET action = EXCLUDED.action, severity = EXCLUDED.severity
       RETURNING id, created_at
     `) as unknown as RIRow[]
-    return reply.status(201).send({ id: rows[0]!.id, keyword: keyword.trim().toLowerCase(), action: action ?? 'flag', severity: severity ?? 'warning', createdAt: rows[0]!.created_at })
+    const ruleId = rows[0]!.id
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'moderation_rule.created', target: 'moderation_rule', targetId: ruleId, detail: `Created moderation rule for keyword "${keyword.trim().toLowerCase()}"` }).catch(() => {})
+    return reply.status(201).send({ id: ruleId, keyword: keyword.trim().toLowerCase(), action: action ?? 'flag', severity: severity ?? 'warning', createdAt: rows[0]!.created_at })
   })
 
   app.delete('/moderation/rules/:id', async (req, reply) => {
     if (!assertOperator(req, reply)) return
     const { id } = req.params as { id: string }
     await adminDb`DELETE FROM moderation_rules WHERE id = ${id}`
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'moderation_rule.deleted', target: 'moderation_rule', targetId: id, detail: 'Moderation rule deleted' }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -1613,6 +1643,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
         suspension_reason = ${reason ?? 'Manual suspension by operator'}, updated_at = NOW()
       WHERE id = ${clientId}
     `
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.suspended', target: 'client', targetId: clientId, detail: reason ?? 'Manual suspension by operator' }).catch(() => {})
+    logEvent({ eventType: 'business_suspended', severity: 'warning', detail: reason ?? 'Business suspended by operator', clientId }).catch(() => {})
     return reply.status(204).send()
   })
 
@@ -1624,6 +1656,8 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
         suspension_reason = NULL, warning_count = 0, updated_at = NOW()
       WHERE id = ${clientId}
     `
+    auditLog({ actor: 'operator', actorLabel: 'Operator', action: 'client.unsuspended', target: 'client', targetId: clientId, detail: 'Business unsuspended, warnings cleared' }).catch(() => {})
+    logEvent({ eventType: 'business_unsuspended', severity: 'info', detail: 'Business unsuspended by operator', clientId }).catch(() => {})
     return reply.status(204).send()
   })
 

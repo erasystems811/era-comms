@@ -5,6 +5,8 @@ import { config } from '../../shared/config.js'
 import { NotFoundError, ConflictError } from '../../shared/errors.js'
 import { CHANNEL } from '../../queues/definitions.js'
 import { assertScope } from '../middleware/auth.js'
+import { auditLog } from '../../services/audit.js'
+import { logEvent } from '../../services/events.js'
 
 const E164 = /^\+[1-9]\d{6,14}$/
 
@@ -80,6 +82,9 @@ const sessionsRoutes: FastifyPluginAsync = async (app) => {
 
     await req.server.supervisor.startSession(session.id)
 
+    auditLog({ actor: req.clientId, actorLabel: 'Business', action: 'session.created', target: 'session', targetId: session.id, detail: `Created session ${phoneNumber}` }).catch(() => {})
+    logEvent({ eventType: 'session_created', severity: 'info', detail: `Session created for ${phoneNumber}`, clientId: req.clientId, sessionId: session.id }).catch(() => {})
+
     return reply.status(201).send({
       id: session.id,
       phoneNumber,
@@ -135,6 +140,9 @@ const sessionsRoutes: FastifyPluginAsync = async (app) => {
     if (rows.length === 0) throw new NotFoundError('Session')
 
     await req.server.supervisor.stopSession(id)
+
+    auditLog({ actor: req.clientId, actorLabel: 'Business', action: 'session.deleted', target: 'session', targetId: id, detail: 'Session stopped and deleted' }).catch(() => {})
+    logEvent({ eventType: 'session_deleted', severity: 'info', detail: 'Session deleted by business', clientId: req.clientId, sessionId: id }).catch(() => {})
 
     return reply.status(204).send()
   })
