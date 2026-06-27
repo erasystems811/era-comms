@@ -444,11 +444,12 @@ export const connectAgentRoutes: FastifyPluginAsync = async (app) => {
       const { randomBytes } = await import('node:crypto')
       const apiKey = randomBytes(32).toString('hex')
 
-      // ON CONFLICT handles the rare case of two startup events racing
+      // ON CONFLICT handles the rare case of two startup events racing.
+      // Must include the partial-index predicate to match migration 006.
       const [created] = await adminDb<InstanceRow[]>`
         INSERT INTO connect_instances (hospital_name, hospital_id, api_key)
         VALUES (${username}, ${username}, ${apiKey})
-        ON CONFLICT (hospital_id) DO UPDATE
+        ON CONFLICT (hospital_id) WHERE hospital_id IS NOT NULL DO UPDATE
           SET updated_at = NOW()
         RETURNING *
       `
