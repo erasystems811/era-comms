@@ -47,6 +47,7 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
 
     type Row = {
       id: string; name: string; status: string; content: string
+      client_id: string; session_id: string
       total_recipients: number; total_sent: number; total_failed: number
       started_at: string | null; completed_at: string | null; created_at: string
       client_name: string; session_phone: string
@@ -71,6 +72,8 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
 
     return reply.send(rows.map(r => ({
       id:               r.id,
+      clientId:         r.client_id,
+      sessionId:        r.session_id,
       name:             r.name,
       status:           r.status,
       content:          r.content,
