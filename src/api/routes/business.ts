@@ -84,6 +84,7 @@ function mapModuleConfig(mod: {
   knowledge_base: boolean; auto_greet: boolean; business_hours: boolean
   scenarios: boolean; human_handoff: boolean; voice_notes: boolean
   conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean
+  automations: boolean
 }) {
   return {
     knowledgeBase:     mod.knowledge_base,
@@ -95,6 +96,7 @@ function mapModuleConfig(mod: {
     conversationInbox: mod.conversation_inbox,
     analytics:         mod.analytics,
     emailCampaigns:    mod.email_campaigns,
+    automations:       mod.automations,
   }
 }
 
@@ -146,7 +148,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
     type ModRow = {
       knowledge_base: boolean; auto_greet: boolean; business_hours: boolean
       scenarios: boolean; human_handoff: boolean; voice_notes: boolean
-      conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean
+      conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean; automations: boolean
     }
     const mods = (await adminDb`SELECT * FROM module_config WHERE client_id = ${user.client_id}`) as unknown as ModRow[]
     const mod = mods[0]!
@@ -217,7 +219,7 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
     type ModRow = {
       knowledge_base: boolean; auto_greet: boolean; business_hours: boolean
       scenarios: boolean; human_handoff: boolean; voice_notes: boolean
-      conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean
+      conversation_inbox: boolean; analytics: boolean; email_campaigns: boolean; automations: boolean
     }
     const mods    = (await adminDb`SELECT * FROM module_config WHERE client_id = ${auth.clientId}`) as unknown as ModRow[]
     const mod     = mods[0]!
@@ -1303,23 +1305,213 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
     return reply.send(rows.map(r => ({ phoneNumber: r.phone_number, optedOutAt: r.opted_out_at, updatedAt: r.updated_at })))
   })
 
-  // ── AUTOMATIONS (self-service, read-only) ──────────────────────
+  // ── AUTOMATIONS (full self-service CRUD) ──────────────────────
+
+  const E164_AUTO = /^\+[1-9]\d{6,14}$/
 
   app.get('/automations', async (req, reply) => {
     const auth = getBizAuth(req, reply)
     if (!auth) return
-    type FRow = { id: string; name: string; description: string | null; trigger_type: string; status: string; total_enrolled: number; total_completed: number; created_at: string }
+    type FRow = { id: string; name: string; description: string | null; trigger_type: string; trigger_key: string | null; status: string; total_enrolled: number; total_completed: number; created_at: string; session_phone: string }
     const rows = (await adminDb`
-      SELECT id, name, description, trigger_type, status, total_enrolled, total_completed, created_at
-      FROM automation_flows WHERE client_id = ${auth.clientId} AND status != 'archived'
-      ORDER BY created_at DESC
+      SELECT f.id, f.name, f.description, f.trigger_type, f.trigger_key, f.status,
+             f.total_enrolled, f.total_completed, f.created_at, s.phone_number AS session_phone
+      FROM automation_flows f
+      JOIN whatsapp_sessions s ON s.id = f.session_id
+      WHERE f.client_id = ${auth.clientId} AND f.status != 'archived'
+      ORDER BY f.created_at DESC
     `) as unknown as FRow[]
     return reply.send(rows.map(r => ({
       id: r.id, name: r.name, description: r.description,
-      triggerType: r.trigger_type, status: r.status,
+      triggerType: r.trigger_type, triggerKey: r.trigger_key, status: r.status,
       totalEnrolled: Number(r.total_enrolled), totalCompleted: Number(r.total_completed),
-      createdAt: r.created_at,
+      createdAt: r.created_at, sessionPhone: r.session_phone,
     })))
+  })
+
+  app.post('/automations', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const body = req.body as {
+      name?: string; description?: string; sessionId?: string
+      triggerType?: 'api' | 'manual'
+      steps?: { stepType: 'send_message' | 'wait'; content?: string; contentType?: string; delayMinutes?: number }[]
+    }
+    if (!body.name?.trim() || !body.sessionId) {
+      return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'name and sessionId are required' })
+    }
+    const sess = (await adminDb`SELECT id FROM whatsapp_sessions WHERE id = ${body.sessionId} AND client_id = ${auth.clientId}`) as unknown as Array<{ id: string }>
+    if (!sess[0]) return reply.status(403).send({ error: 'FORBIDDEN', message: 'Session not found' })
+
+    const triggerType = body.triggerType ?? 'manual'
+    const triggerKey  = triggerType === 'api' ? randomBytes(12).toString('hex') : null
+
+    type FIRow = { id: string; created_at: string }
+    const rows = (await adminDb`
+      INSERT INTO automation_flows (client_id, session_id, name, description, trigger_type, trigger_key)
+      VALUES (${auth.clientId}, ${body.sessionId}, ${body.name.trim()}, ${body.description ?? null}, ${triggerType}, ${triggerKey})
+      RETURNING id, created_at
+    `) as unknown as FIRow[]
+    const flowId = rows[0]!.id
+
+    const steps = body.steps ?? []
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i]!
+      await adminDb`
+        INSERT INTO automation_steps (flow_id, step_order, step_type, content, content_type, delay_minutes)
+        VALUES (${flowId}, ${i}, ${s.stepType}, ${s.content ?? null}, ${s.contentType ?? 'text'}, ${s.delayMinutes ?? 0})
+      `
+    }
+    return reply.status(201).send({ id: flowId, triggerKey, createdAt: rows[0]!.created_at })
+  })
+
+  app.get('/automations/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    type FRow2 = { id: string; name: string; description: string | null; trigger_type: string; trigger_key: string | null; status: string; total_enrolled: number; total_completed: number; created_at: string; session_id: string; session_phone: string }
+    const flows = (await adminDb`
+      SELECT f.*, s.phone_number AS session_phone
+      FROM automation_flows f JOIN whatsapp_sessions s ON s.id = f.session_id
+      WHERE f.id = ${id} AND f.client_id = ${auth.clientId}
+    `) as unknown as FRow2[]
+    if (!flows[0]) return reply.status(404).send({ error: 'NOT_FOUND', message: 'Flow not found' })
+
+    type SRow = { id: string; step_order: number; step_type: string; content: string | null; content_type: string; delay_minutes: number }
+    const steps = (await adminDb`
+      SELECT id, step_order, step_type, content, content_type, delay_minutes
+      FROM automation_steps WHERE flow_id = ${id} ORDER BY step_order
+    `) as unknown as SRow[]
+
+    type CRow = { total: string; active: string; completed: string }
+    const counts = (await adminDb`
+      SELECT COUNT(*)::text AS total,
+             COUNT(*) FILTER (WHERE status = 'active')::text AS active,
+             COUNT(*) FILTER (WHERE status = 'completed')::text AS completed
+      FROM automation_enrollments WHERE flow_id = ${id}
+    `) as unknown as CRow[]
+
+    const f = flows[0]!
+    return reply.send({
+      id: f.id, name: f.name, description: f.description,
+      triggerType: f.trigger_type, triggerKey: f.trigger_key, status: f.status,
+      sessionId: f.session_id, sessionPhone: f.session_phone,
+      totalEnrolled: Number(f.total_enrolled), totalCompleted: Number(f.total_completed),
+      createdAt: f.created_at,
+      enrollmentStats: {
+        total:     parseInt(counts[0]?.total ?? '0', 10),
+        active:    parseInt(counts[0]?.active ?? '0', 10),
+        completed: parseInt(counts[0]?.completed ?? '0', 10),
+      },
+      steps: steps.map(s => ({
+        id: s.id, stepOrder: s.step_order, stepType: s.step_type,
+        content: s.content, contentType: s.content_type, delayMinutes: s.delay_minutes,
+      })),
+    })
+  })
+
+  app.patch('/automations/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    const body = req.body as { name?: string; description?: string; status?: 'active' | 'paused' }
+    await adminDb`
+      UPDATE automation_flows SET
+        name        = COALESCE(${body.name        ?? null}, name),
+        description = COALESCE(${body.description ?? null}, description),
+        status      = COALESCE(${body.status      ?? null}, status),
+        updated_at  = NOW()
+      WHERE id = ${id} AND client_id = ${auth.clientId}
+    `
+    return reply.status(204).send()
+  })
+
+  app.put('/automations/:id/steps', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    const own = (await adminDb`SELECT id FROM automation_flows WHERE id = ${id} AND client_id = ${auth.clientId}`) as unknown as Array<{ id: string }>
+    if (!own[0]) return reply.status(404).send({ error: 'NOT_FOUND', message: 'Flow not found' })
+
+    const body = req.body as { steps: { stepType: 'send_message' | 'wait'; content?: string; contentType?: string; delayMinutes?: number }[] }
+    await adminDb`DELETE FROM automation_steps WHERE flow_id = ${id}`
+    for (let i = 0; i < body.steps.length; i++) {
+      const s = body.steps[i]!
+      await adminDb`
+        INSERT INTO automation_steps (flow_id, step_order, step_type, content, content_type, delay_minutes)
+        VALUES (${id}, ${i}, ${s.stepType}, ${s.content ?? null}, ${s.contentType ?? 'text'}, ${s.delayMinutes ?? 0})
+      `
+    }
+    return reply.status(204).send()
+  })
+
+  app.delete('/automations/:id', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    await adminDb`UPDATE automation_flows SET status = 'archived', updated_at = NOW() WHERE id = ${id} AND client_id = ${auth.clientId}`
+    return reply.status(204).send()
+  })
+
+  app.post('/automations/:id/enroll', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    type FlowStatus = { status: string }
+    const flows = (await adminDb`SELECT status FROM automation_flows WHERE id = ${id} AND client_id = ${auth.clientId}`) as unknown as FlowStatus[]
+    if (!flows[0]) return reply.status(404).send({ error: 'NOT_FOUND', message: 'Flow not found' })
+    if (flows[0].status !== 'active') return reply.status(409).send({ error: 'CONFLICT', message: 'Flow must be active to enroll contacts' })
+
+    const body = req.body as { contacts?: { phoneNumber: string; name?: string }[] }
+    if (!body.contacts?.length) return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'contacts array is required' })
+
+    let enrolled = 0
+    for (const c of body.contacts) {
+      if (!E164_AUTO.test(c.phoneNumber)) continue
+      try {
+        await adminDb`
+          INSERT INTO automation_enrollments (flow_id, client_id, phone_number, name, next_step_at)
+          VALUES (${id}, ${auth.clientId}, ${c.phoneNumber}, ${c.name ?? null}, NOW())
+          ON CONFLICT (flow_id, phone_number) DO NOTHING
+        `
+        enrolled++
+      } catch { /* skip */ }
+    }
+    if (enrolled > 0) {
+      await adminDb`UPDATE automation_flows SET total_enrolled = total_enrolled + ${enrolled}, updated_at = NOW() WHERE id = ${id}`
+    }
+    return reply.send({ enrolled })
+  })
+
+  app.get('/automations/:id/enrollments', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id } = req.params as { id: string }
+    const own = (await adminDb`SELECT id FROM automation_flows WHERE id = ${id} AND client_id = ${auth.clientId}`) as unknown as Array<{ id: string }>
+    if (!own[0]) return reply.status(404).send({ error: 'NOT_FOUND', message: 'Flow not found' })
+
+    type ERow = { id: string; phone_number: string; name: string | null; current_step: number; status: string; next_step_at: string; created_at: string }
+    const rows = (await adminDb`
+      SELECT id, phone_number, name, current_step, status, next_step_at, created_at
+      FROM automation_enrollments WHERE flow_id = ${id}
+      ORDER BY created_at DESC LIMIT 500
+    `) as unknown as ERow[]
+    return reply.send(rows.map(r => ({
+      id: r.id, phoneNumber: r.phone_number, name: r.name,
+      currentStep: r.current_step, status: r.status,
+      nextStepAt: r.next_step_at, createdAt: r.created_at,
+    })))
+  })
+
+  app.delete('/automations/:id/enrollments/:enrollmentId', async (req, reply) => {
+    const auth = getBizAuth(req, reply)
+    if (!auth) return
+    const { id, enrollmentId } = req.params as { id: string; enrollmentId: string }
+    await adminDb`
+      UPDATE automation_enrollments SET status = 'cancelled', updated_at = NOW()
+      WHERE id = ${enrollmentId} AND flow_id = ${id} AND client_id = ${auth.clientId}
+    `
+    return reply.status(204).send()
   })
 
   // ── BROADCASTS (self-service, read-only) ──────────────────────
