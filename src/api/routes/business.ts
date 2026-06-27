@@ -672,10 +672,22 @@ const businessRoutes: FastifyPluginAsync = async (app) => {
     const { period } = req.query as { period?: string }
     const now = new Date()
     let startOfMonth: Date, endOfMonth: Date
-    if (period) {
+    if (period === 'today') {
+      startOfMonth = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0)
+      endOfMonth   = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59)
+    } else if (period === 'this_week') {
+      const day = now.getDay()
+      const monday = new Date(now); monday.setDate(now.getDate() - ((day + 6) % 7)); monday.setHours(0, 0, 0, 0)
+      const sunday = new Date(monday); sunday.setDate(monday.getDate() + 6); sunday.setHours(23, 59, 59, 0)
+      startOfMonth = monday; endOfMonth = sunday
+    } else if (period === 'last_month') {
+      const d = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+      startOfMonth = d
+      endOfMonth   = new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59)
+    } else if (period && /^\d{4}-\d{2}$/.test(period)) {
       const parts = period.split('-')
-      const yr = parseInt(parts[0] ?? '2000', 10)
-      const mo = parseInt(parts[1] ?? '1', 10)
+      const yr = parseInt(parts[0]!, 10)
+      const mo = parseInt(parts[1]!, 10)
       startOfMonth = new Date(yr, mo - 1, 1)
       endOfMonth   = new Date(yr, mo, 0, 23, 59, 59)
     } else {
