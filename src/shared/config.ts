@@ -36,20 +36,16 @@ const schema = z.object({
 
   EMAIL_FROM: z.preprocess(v => (typeof v === 'string' ? v.trim() : v), z.string().optional().default('noreply@erasystems.com.ng')),
 
-  // SMTP — for system emails (OTP codes, welcome emails). Use Gmail or any email account.
-  SMTP_HOST: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
-  SMTP_PORT: z.coerce.number().int().default(587),
-  SMTP_USER: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
-  SMTP_PASS: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
-
-  // Postal — self-hosted email server on your VPS (powers the business email campaign feature)
+  // Postal — self-hosted email server on your VPS (all email — transactional + campaigns)
   POSTAL_SERVER_URL:      z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
   POSTAL_API_KEY:         z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
   POSTAL_RATE_LIMIT:      z.coerce.number().int().default(50),
   POSTAL_WEBHOOK_SECRET:  z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
   PUBLIC_URL:             z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()).default('https://xeyfmi3l8l5m.share.zrok.io'),
 
-  // Voice infrastructure
+  // Voice infrastructure — only started when ENABLE_VOICE=true
+  ENABLE_VOICE: z.preprocess(v => v === 'true' || v === '1', z.boolean()).default(false),
+
   SIP_TRUNK_HOST: z.string().optional(),
   SIP_TRUNK_USERNAME: z.string().optional(),
   SIP_TRUNK_PASSWORD: z.string().optional(),
@@ -110,11 +106,7 @@ export const config = Object.freeze({
   connectSharedSecret: env.CONNECT_SHARED_SECRET,
 
   email: {
-    from:            env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
-    smtpHost:        env.SMTP_HOST,
-    smtpPort:        env.SMTP_PORT,
-    smtpUser:        env.SMTP_USER,
-    smtpPass:        env.SMTP_PASS,
+    from:                env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
     postalServerUrl:     env.POSTAL_SERVER_URL,
     postalApiKey:        env.POSTAL_API_KEY,
     postalRateLimit:     env.POSTAL_RATE_LIMIT,
@@ -129,6 +121,7 @@ export const config = Object.freeze({
   },
 
   voice: {
+    enabled: env.ENABLE_VOICE,
     sip: {
       host: env.SIP_TRUNK_HOST,
       username: env.SIP_TRUNK_USERNAME,

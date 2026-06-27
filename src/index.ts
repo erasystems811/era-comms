@@ -35,9 +35,9 @@ async function main(): Promise<void> {
   const emailCampaignWorker    = startEmailCampaignWorker()
   const emailAutomationWorker  = startEmailAutomationWorker()
 
-  // Start voice subsystem — connects to FreeSWITCH ESL
-  const callSupervisor = new CallSupervisor()
-  await callSupervisor.start()
+  // Start voice subsystem only when ENABLE_VOICE=true is set
+  const callSupervisor = config.voice.enabled ? new CallSupervisor() : null
+  if (callSupervisor) await callSupervisor.start()
 
   // Build and start the Fastify API server
   const app = await buildServer(supervisor)
@@ -78,7 +78,7 @@ async function main(): Promise<void> {
     clearInterval(scheduledCampaignPoller)
     clearInterval(depthPoller)
     await Promise.all(polledQueues.map((q) => q.close()))
-    callSupervisor.stop()
+    callSupervisor?.stop()
     await app.close()
     await inboundWorker.close()
     await webhookWorker.close()
