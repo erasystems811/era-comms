@@ -81,24 +81,23 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
       : html + unsubBlock
   }
 
-  // Try Postal first (high-volume, dedicated IP). Fall back to SMTP when Postal isn't set up yet.
+  // Try Postal first (high-volume, dedicated IP). Fall back to sendEmail when Postal isn't set up.
   let sent = false
   let postalMessageId: string | null = null
 
-  const postalResult = await postalSend({
-    to:          [email],
-    from:        `${row.from_name} <${row.from_email}>`,
-    subject,
-    htmlBody:    html,
-    tag:         campaignId,
-    listUnsubscribe: unsubUrl ?? undefined,
-  })
-
-  if (postalResult) {
+  try {
+    const postalResult = await postalSend({
+      to:          [email],
+      from:        `${row.from_name} <${row.from_email}>`,
+      subject,
+      htmlBody:    html,
+      tag:         campaignId,
+      listUnsubscribe: unsubUrl ?? undefined,
+    })
     sent = true
     postalMessageId = postalResult.messageId
-  } else {
-    // Postal not configured — fall back to SMTP
+  } catch (postalErr) {
+    log.warn({ campaignId, email, err: postalErr }, 'Postal send failed — falling back to transactional sendEmail')
     sent = (await sendEmail({ to: email, subject, html })).sent
   }
 

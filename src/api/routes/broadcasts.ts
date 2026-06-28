@@ -117,8 +117,11 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
     const broadcastId = rows[0]!.id
 
     // Insert recipients if provided
+    const submitted = body.recipients?.length ?? 0
+    let validCount = 0
     if (body.recipients && body.recipients.length > 0) {
       const valid = body.recipients.filter(r => E164_RE.test(r.phoneNumber))
+      validCount = valid.length
       for (const r of valid) {
         await adminDb`
           INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name)
@@ -132,6 +135,8 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
       `
     }
 
+    const invalidRecipients = submitted - validCount
+
     await auditLog(
       'broadcast.created',
       body.name.trim(),
@@ -139,7 +144,7 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
       `Created broadcast "${body.name.trim()}" with ${body.recipients?.length ?? 0} recipient(s)`,
     )
 
-    return reply.status(201).send({ id: broadcastId, createdAt: rows[0]!.created_at })
+    return reply.status(201).send({ id: broadcastId, createdAt: rows[0]!.created_at, invalidRecipients })
   })
 
   // ── GET /broadcasts/:id — get broadcast with recipients ───────
@@ -277,7 +282,7 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
     const cnt = (await adminDb`SELECT COUNT(*)::text AS total FROM broadcast_recipients WHERE broadcast_id = ${id}`) as unknown as CountRow[]
     await adminDb`UPDATE whatsapp_broadcasts SET total_recipients = ${parseInt(cnt[0]?.total ?? '0', 10)} WHERE id = ${id}`
 
-    return reply.send({ added })
+    return reply.send({ added, invalid: body.recipients.length - added })
   })
 
   // ── POST /broadcasts/:id/send — start sending ─────────────────
