@@ -113,6 +113,33 @@ async function start(): Promise<void> {
     })
   })
 
+  // ── DELIVERY RECEIPT HANDLER ─────────────────────────────────
+
+  session.onReceipt(async (waMessageId, statusCode) => {
+    const newStatus = statusCode >= 4 ? 'read' : 'delivered'
+    const rows = await q<{ id: string; client_id: string }>(
+      adminDb`
+        UPDATE messages
+        SET status       = ${newStatus},
+            delivered_at = COALESCE(delivered_at, NOW()),
+            read_at      = CASE WHEN ${statusCode >= 4} THEN NOW() ELSE read_at END
+        WHERE wa_message_id = ${waMessageId}
+          AND status        IN ('sent', 'delivered')
+        RETURNING id, client_id
+      `,
+    )
+    if (!rows[0]) return
+
+    void logEvent({
+      eventType: 'message_delivered',
+      severity:  'info',
+      detail:    statusCode >= 4 ? 'Message read by recipient' : 'Message delivered to recipient',
+      clientId:  rows[0].client_id,
+      sessionId: SESSION_ID,
+      metadata:  { messageId: rows[0].id, waMessageId, statusCode },
+    }).catch((err: unknown) => workerLogger.error({ err }, 'message_delivered event write failed'))
+  })
+
   // ── STATUS PUBLISHER ─────────────────────────────────────────
 
   const publishStatus = async (
@@ -276,7 +303,7 @@ async function start(): Promise<void> {
         logEvent({
           eventType: 'message_sent',
           severity:  'info',
-          detail:    `Message sent to ${to}`,
+          detail:    `Message dispatched to WhatsApp for ${to} — awaiting delivery confirmation`,
           clientId,
           sessionId: SESSION_ID,
           metadata:  { messageId, to, waMessageId: result.waMessageId },

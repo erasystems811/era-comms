@@ -68,6 +68,11 @@ export interface IWhatsAppSession {
   // Register a callback that fires once when the session successfully connects.
   onConnected(handler: () => Promise<void>): void
 
+  // Register a handler for WhatsApp delivery receipts.
+  // Called when WhatsApp confirms a message was delivered or read.
+  // statusCode: 3 = delivered to device, 4 = read by recipient.
+  onReceipt(handler: (waMessageId: string, statusCode: number) => Promise<void>): void
+
   // Push WhatsApp Business profile fields to the connected account.
   applyProfile(profile: SessionProfile): Promise<void>
 

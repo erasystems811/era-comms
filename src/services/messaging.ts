@@ -5,6 +5,7 @@ import { config } from '../shared/config.js'
 import { NotFoundError, SessionError, PlanLimitError } from '../shared/errors.js'
 import { checkMessagePlanLimits } from './plan.js'
 import { messagesQueuedTotal, messagesPlanRejectedTotal } from '../observability/metrics.js'
+import { logEvent } from './events.js'
 import { QUEUE } from '../queues/definitions.js'
 import type { OutboundMessageJob } from '../queues/definitions.js'
 
@@ -257,6 +258,16 @@ export async function sendMessage(opts: SendMessageOptions): Promise<SendMessage
   // Enqueue AFTER the transaction commits — the worker reads the message record
   if (!result.idempotent) {
     messagesQueuedTotal.inc({ client_id: clientId })
+
+    void logEvent({
+      eventType: 'message_queued',
+      severity:  'info',
+      detail:    `Message queued for ${to}`,
+      clientId,
+      sessionId,
+      metadata:  { messageId: result.messageId, to },
+    }).catch(() => {})
+
     await getOutboundQueue(sessionId).add(
       'outbound',
       {

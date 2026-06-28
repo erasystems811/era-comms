@@ -44,6 +44,7 @@ export class BaileysSession implements IWhatsAppSession {
   private _fingerprint: DeviceFingerprint | null = null
   private messageHandler: ((msg: InboundMessage) => Promise<void>) | null = null
   private connectedHandler: (() => Promise<void>) | null = null
+  private receiptHandler: ((waMessageId: string, statusCode: number) => Promise<void>) | null = null
 
   // QR event listeners — one per concurrent WebSocket connection (usually one)
   private qrListeners: Array<(event: QREvent) => void> = []
@@ -107,6 +108,19 @@ export class BaileysSession implements IWhatsAppSession {
       for (const msg of messages) {
         if (!msg.message || msg.key.fromMe) continue
         void this.handleInboundMessage(msg)
+      }
+    })
+
+    // Delivery and read receipts — WhatsApp sends these asynchronously after
+    // the message reaches the recipient's device. statusCode 3 = delivered, 4 = read.
+    this.socket.ev.on('messages.update', (updates) => {
+      for (const upd of updates) {
+        const id = upd.key?.id
+        const statusCode = upd.update?.status
+        if (!id || !upd.key?.fromMe || !statusCode || statusCode < 3) continue
+        if (this.receiptHandler) {
+          void this.receiptHandler(id, statusCode).catch(() => {})
+        }
       }
     })
   }
@@ -225,6 +239,10 @@ export class BaileysSession implements IWhatsAppSession {
 
   onConnected(handler: () => Promise<void>): void {
     this.connectedHandler = handler
+  }
+
+  onReceipt(handler: (waMessageId: string, statusCode: number) => Promise<void>): void {
+    this.receiptHandler = handler
   }
 
   async applyProfile(profile: SessionProfile): Promise<void> {
