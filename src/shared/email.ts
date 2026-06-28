@@ -1,3 +1,4 @@
+import nodemailer from 'nodemailer'
 import { postalSend } from '../services/postal.js'
 import { config } from './config.js'
 import { logger } from './logger.js'
@@ -11,7 +12,48 @@ export interface EmailOptions {
   text?: string
 }
 
+// One shared transporter — nodemailer reuses the SMTP connection pool.
+let _transporter: nodemailer.Transporter | null = null
+
+function getTransporter(): nodemailer.Transporter | null {
+  if (!config.email.smtpUser || !config.email.smtpPass) return null
+  if (!_transporter) {
+    _transporter = nodemailer.createTransport({
+      host:   'smtp.gmail.com',
+      port:   587,
+      secure: false,
+      auth: {
+        user: config.email.smtpUser,
+        pass: config.email.smtpPass,
+      },
+    })
+  }
+  return _transporter
+}
+
 export async function sendEmail(opts: EmailOptions): Promise<{ sent: boolean; error?: string }> {
+  const transporter = getTransporter()
+
+  if (transporter) {
+    // Gmail SMTP — transactional emails
+    try {
+      await transporter.sendMail({
+        from:    `ERA Systems <${config.email.smtpUser}>`,
+        to:      opts.to,
+        subject: opts.subject,
+        html:    opts.html,
+        text:    opts.text,
+      })
+      log.info({ to: opts.to, subject: opts.subject }, 'Email sent via Gmail SMTP')
+      return { sent: true }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      log.error({ to: opts.to, subject: opts.subject, err: msg }, 'Gmail SMTP failed')
+      return { sent: false, error: msg }
+    }
+  }
+
+  // Fall back to Postal if Gmail SMTP is not configured
   try {
     await postalSend({
       to:       [opts.to],

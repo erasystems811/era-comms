@@ -36,7 +36,11 @@ const schema = z.object({
 
   EMAIL_FROM: z.preprocess(v => (typeof v === 'string' ? v.trim() : v), z.string().optional().default('noreply@erasystems.com.ng')),
 
-  // Postal — self-hosted email server on your VPS (all email — transactional + campaigns)
+  // Gmail SMTP — transactional email (approvals, API keys, notifications)
+  SMTP_USER: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+  SMTP_PASS: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+
+  // Postal — self-hosted email server on your VPS (bulk campaigns only)
   POSTAL_SERVER_URL:      z.preprocess(v => (v === '' ? undefined : v), z.string().url().optional()),
   POSTAL_API_KEY:         z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
   POSTAL_RATE_LIMIT:      z.coerce.number().int().default(50),
@@ -107,6 +111,8 @@ export const config = Object.freeze({
 
   email: {
     from:                env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
+    smtpUser:            env.SMTP_USER,
+    smtpPass:            env.SMTP_PASS,
     postalServerUrl:     env.POSTAL_SERVER_URL,
     postalApiKey:        env.POSTAL_API_KEY,
     postalRateLimit:     env.POSTAL_RATE_LIMIT,
