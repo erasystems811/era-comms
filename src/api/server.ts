@@ -18,7 +18,6 @@ import metricsRoute from './routes/metrics-route.js'
 import emailRoutes      from './routes/email.js'
 import broadcastRoutes  from './routes/broadcasts.js'
 import automationRoutes from './routes/automations.js'
-import developerAutomationRoutes from './routes/developer-automations.js'
 import accountRoutes             from './routes/account.js'
 import { connectAdminRoutes, connectAgentRoutes } from './routes/connect.js'
 import './types.js'
@@ -84,9 +83,8 @@ export async function buildServer(supervisor: ISessionSupervisor) {
       v1.addHook('preHandler', authHook)
       await v1.register(accountRoutes,              { prefix: '/me' })
       await v1.register(sessionRoutes,              { prefix: '/sessions' })
-      await v1.register(messagesRoutes,             { prefix: '/messages' })
-      await v1.register(webhooksRoutes,             { prefix: '/webhooks' })
-      await v1.register(developerAutomationRoutes,  { prefix: '/automations' })
+      await v1.register(messagesRoutes,  { prefix: '/messages' })
+      await v1.register(webhooksRoutes,  { prefix: '/webhooks' })
     },
     { prefix: '/v1' },
   )
