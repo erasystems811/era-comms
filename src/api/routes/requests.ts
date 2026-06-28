@@ -14,12 +14,12 @@
 //   PATCH /v1/admin/ai-templates/:id
 //   DELETE /v1/admin/ai-templates/:id  (soft-archive)
 
-import { randomBytes, scrypt } from 'node:crypto'
+import { randomBytes, scrypt, createHash } from 'node:crypto'
 import { promisify } from 'node:util'
 import type { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify'
 import { adminDb } from '../../db/client.js'
 import { config } from '../../shared/config.js'
-import { sendEmail, portalAccessEmail } from '../../shared/email.js'
+import { sendEmail, portalAccessEmail, apiKeyEmail } from '../../shared/email.js'
 import { NotFoundError } from '../../shared/errors.js'
 import { sendMessage } from '../../services/messaging.js'
 
@@ -214,17 +214,6 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
 
     const clientId = clientRows[0]!.id
 
-    // Generate a temporary password (business will change on first login)
-    const tempPassword = randomBytes(8).toString('hex') // 16 char random hex
-    const passwordHash = await hashPassword(tempPassword)
-
-    // Create business portal user account
-    await adminDb`
-      INSERT INTO business_users (client_id, email, password_hash)
-      VALUES (${clientId}, ${request.contact_email}, ${passwordHash})
-      ON CONFLICT DO NOTHING
-    `
-
     // Seed default module config
     await adminDb`INSERT INTO module_config (client_id) VALUES (${clientId}) ON CONFLICT DO NOTHING`
 
@@ -235,7 +224,6 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       WHERE id = ${id}
     `
 
-    // Audit log
     await adminDb`
       INSERT INTO audit_log (actor, actor_label, action, target, target_id, detail)
       VALUES (
@@ -245,10 +233,76 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       )
     `
 
-    // Deliver credentials to the business owner via email and WhatsApp
     const portalUrl = process.env.PORTAL_URL ?? (config.isProduction
       ? 'https://era-hub.up.railway.app'
       : 'http://localhost:5173')
+
+    // ── Developer tier: API key + secure reveal link ──────────────
+    if (request.tier === 'developer') {
+      const rawKey  = `era_${randomBytes(24).toString('hex')}`
+      const keyHash = createHash('sha256').update(rawKey).digest('hex')
+      const prefix  = rawKey.slice(0, 12)
+
+      type KeyRow = { id: string }
+      const keyRows = (await adminDb`
+        INSERT INTO api_keys (client_id, key_hash, key_prefix, label, environment, scopes)
+        VALUES (${clientId}, ${keyHash}, ${prefix}, 'Default', 'live', ${'{"messaging","conversations","analytics"}'}::text[])
+        RETURNING id
+      `) as unknown as KeyRow[]
+
+      const keyId = keyRows[0]!.id
+
+      const revealToken = randomBytes(32).toString('hex')
+      await adminDb`
+        INSERT INTO api_key_reveal_tokens (token, api_key_id, key_value, label, client_name)
+        VALUES (${revealToken}, ${keyId}, ${rawKey}, 'Default', ${request.business_name})
+      `
+
+      const revealUrl = `${portalUrl}/reveal-key/${revealToken}`
+
+      const [emailSent, whatsApp] = await Promise.all([
+        sendEmail(apiKeyEmail({
+          businessName: request.business_name,
+          email:        request.contact_email,
+          revealUrl,
+          keyLabel:     'Default',
+        })).catch(err => {
+          console.error('API key email failed:', err)
+          return false
+        }),
+        request.contact_phone
+          ? sendWelcomeWhatsApp({
+              phone:        request.contact_phone,
+              businessName: request.business_name,
+              email:        request.contact_email,
+              tempPassword: `Your API key reveal link has been sent to ${request.contact_email}. Open it to retrieve your key — it works once only.`,
+              portalUrl,
+            }).catch(err => {
+              console.error('Welcome WhatsApp failed:', err)
+              return { sent: false, note: String(err) }
+            })
+          : Promise.resolve({ sent: false, note: 'No phone number on this request' }),
+      ])
+
+      return reply.status(201).send({
+        clientId,
+        tier:          'developer',
+        keyPreview:    prefix,
+        emailSent:     !!emailSent,
+        whatsappSent:  whatsApp.sent,
+        whatsappNote:  whatsApp.note,
+      })
+    }
+
+    // ── AI Agent tier: portal login + temp password ───────────────
+    const tempPassword = randomBytes(8).toString('hex')
+    const passwordHash = await hashPassword(tempPassword)
+
+    await adminDb`
+      INSERT INTO business_users (client_id, email, password_hash)
+      VALUES (${clientId}, ${request.contact_email}, ${passwordHash})
+      ON CONFLICT DO NOTHING
+    `
 
     const [emailSent, whatsApp] = await Promise.all([
       sendEmail(portalAccessEmail({
@@ -276,6 +330,7 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
 
     return reply.status(201).send({
       clientId,
+      tier:          'ai_agent',
       tempPassword,
       emailSent:     !!emailSent,
       whatsappSent:  whatsApp.sent,
