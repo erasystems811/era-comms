@@ -86,7 +86,7 @@ async function start(): Promise<void> {
   // ── INBOUND MESSAGE HANDLER ──────────────────────────────────
 
   const inboundQueue = new Queue<InboundMessageJob>(QUEUE.inbound, {
-    connection: { url: config.redis.url },
+    connection: { url: config.redis.url, keepAlive: 10000, connectTimeout: 30000, retryStrategy: (t: number) => Math.min(t * 500, 10000) },
   })
 
   session.onMessage(async (msg: InboundMessage) => {
@@ -356,7 +356,7 @@ async function start(): Promise<void> {
 
   // ── COMMAND SUBSCRIBER ────────────────────────────────────────
 
-  const commandSubscriber = new Redis(config.redis.url, { maxRetriesPerRequest: null })
+  const commandSubscriber = new Redis(config.redis.url, { maxRetriesPerRequest: null, keepAlive: 10000, connectTimeout: 30000, retryStrategy: (t: number) => Math.min(t * 500, 10000) })
   await commandSubscriber.subscribe(CHANNEL.sessionCommand(SESSION_ID))
 
   commandSubscriber.on('message', (_channel: string, message: string) => {

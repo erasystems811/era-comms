@@ -7,6 +7,9 @@ function createClient(name: string): Redis {
     maxRetriesPerRequest: null,  // required by BullMQ
     enableReadyCheck: false,
     lazyConnect: false,
+    keepAlive: 10000,            // TCP keepalive — prevents Android from killing idle connections
+    connectTimeout: 30000,
+    retryStrategy: (times: number) => Math.min(times * 500, 10000),
   })
 
   client.on('connect', () => logger.info({ name }, 'Redis connected'))
