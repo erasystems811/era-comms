@@ -260,16 +260,13 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
 
       const revealUrl = `${portalUrl}/reveal-key/${revealToken}`
 
-      const [emailSent, whatsApp] = await Promise.all([
+      const [emailResult, whatsApp] = await Promise.all([
         sendEmail(apiKeyEmail({
           businessName: request.business_name,
           email:        request.contact_email,
           revealUrl,
           keyLabel:     'Default',
-        })).catch(err => {
-          console.error('API key email failed:', err)
-          return false
-        }),
+        })),
         request.contact_phone
           ? sendWelcomeWhatsApp({
               phone:        request.contact_phone,
@@ -277,10 +274,7 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
               email:        request.contact_email,
               tempPassword: `Your API key reveal link has been sent to ${request.contact_email}. Open it to retrieve your key — it works once only.`,
               portalUrl,
-            }).catch(err => {
-              console.error('Welcome WhatsApp failed:', err)
-              return { sent: false, note: String(err) }
-            })
+            }).catch(err => ({ sent: false, note: String(err) }))
           : Promise.resolve({ sent: false, note: 'No phone number on this request' }),
       ])
 
@@ -288,7 +282,8 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
         clientId,
         tier:          'developer',
         keyPreview:    prefix,
-        emailSent:     !!emailSent,
+        emailSent:     emailResult.sent,
+        emailError:    emailResult.error,
         whatsappSent:  whatsApp.sent,
         whatsappNote:  whatsApp.note,
       })
@@ -304,16 +299,13 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       ON CONFLICT DO NOTHING
     `
 
-    const [emailSent, whatsApp] = await Promise.all([
+    const [emailResult, whatsApp] = await Promise.all([
       sendEmail(portalAccessEmail({
         businessName: request.business_name,
         email:        request.contact_email,
         portalUrl,
         tempPassword,
-      })).catch(err => {
-        console.error('Portal access email failed:', err)
-        return false
-      }),
+      })),
       request.contact_phone
         ? sendWelcomeWhatsApp({
             phone:        request.contact_phone,
@@ -321,10 +313,7 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
             email:        request.contact_email,
             tempPassword,
             portalUrl,
-          }).catch(err => {
-            console.error('Welcome WhatsApp failed:', err)
-            return { sent: false, note: String(err) }
-          })
+          }).catch(err => ({ sent: false, note: String(err) }))
         : Promise.resolve({ sent: false, note: 'No phone number on this request' }),
     ])
 
@@ -332,7 +321,8 @@ const requestsRoutes: FastifyPluginAsync = async (app) => {
       clientId,
       tier:          'ai_agent',
       tempPassword,
-      emailSent:     !!emailSent,
+      emailSent:     emailResult.sent,
+      emailError:    emailResult.error,
       whatsappSent:  whatsApp.sent,
       whatsappNote:  whatsApp.note,
     })

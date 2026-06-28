@@ -48,14 +48,14 @@ function isConfigured(): boolean {
 }
 
 // Send a single email. Returns null if Postal is not configured.
-export async function postalSend(opts: PostalSendOptions): Promise<PostalSendResult | null> {
+export async function postalSend(opts: PostalSendOptions): Promise<PostalSendResult> {
   if (!isConfigured()) {
-    log.warn({ to: opts.to }, 'Postal not configured — email skipped')
-    return null
+    throw new Error('POSTAL_SERVER_URL or POSTAL_API_KEY is not set — add them to Railway environment variables')
   }
 
+  let res: Response
   try {
-    const res = await fetch(postalUrl('send/message'), {
+    res = await fetch(postalUrl('send/message'), {
       method: 'POST',
       headers: postalHeaders(),
       body: JSON.stringify({
@@ -73,33 +73,37 @@ export async function postalSend(opts: PostalSendOptions): Promise<PostalSendRes
           : undefined,
       }),
     })
-
-    if (!res.ok) {
-      const body = await res.text()
-      log.error({ status: res.status, body, to: opts.to }, 'Postal API error')
-      return null
-    }
-
-    const data = await res.json() as {
-      status: string
-      data?: { message_id?: string; messages?: Record<string, { id: string; token: string }> }
-    }
-
-    if (data.status !== 'success') {
-      log.error({ data, to: opts.to }, 'Postal returned non-success')
-      return null
-    }
-
-    // Extract first message ID from the response
-    const messages = data.data?.messages ?? {}
-    const firstKey = Object.keys(messages)[0]
-    const msg      = firstKey ? messages[firstKey] : null
-
-    return msg ? { messageId: String(msg.id), token: msg.token } : null
   } catch (err) {
-    log.error({ err, to: opts.to }, 'Postal send threw')
-    return null
+    const msg = err instanceof Error ? err.message : String(err)
+    log.error({ err, to: opts.to }, 'Postal: network error')
+    throw new Error(`Cannot reach Postal server at ${config.email.postalServerUrl}: ${msg}`)
   }
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => '(no body)')
+    log.error({ status: res.status, body, to: opts.to }, 'Postal API error')
+    throw new Error(`Postal returned HTTP ${res.status}: ${body}`)
+  }
+
+  const data = await res.json() as {
+    status: string
+    data?: { message_id?: string; messages?: Record<string, { id: string; token: string }> }
+  }
+
+  if (data.status !== 'success') {
+    log.error({ data, to: opts.to }, 'Postal returned non-success')
+    throw new Error(`Postal error: ${JSON.stringify(data)}`)
+  }
+
+  // Extract first message ID from the response
+  const messages = data.data?.messages ?? {}
+  const firstKey = Object.keys(messages)[0]
+  const msg      = firstKey ? messages[firstKey] : null
+
+  if (!msg) throw new Error('Postal returned success but no message ID in response')
+
+  log.info({ to: opts.to, subject: opts.subject, messageId: String(msg.id) }, 'Email sent via Postal')
+  return { messageId: String(msg.id), token: msg.token }
 }
 
 // Verify that Postal connectivity works. Used in the email overview health check.

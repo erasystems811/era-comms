@@ -11,23 +11,22 @@ export interface EmailOptions {
   text?: string
 }
 
-export async function sendEmail(opts: EmailOptions): Promise<boolean> {
-  const result = await postalSend({
-    to:       [opts.to],
-    from:     `ERA Systems <${config.email.from}>`,
-    subject:  opts.subject,
-    htmlBody: opts.html,
-    textBody: opts.text,
-    tag:      'transactional',
-  })
-
-  if (!result) {
-    log.warn({ to: opts.to, subject: opts.subject }, 'Transactional email skipped — Postal not configured or send failed')
-    return false
+export async function sendEmail(opts: EmailOptions): Promise<{ sent: boolean; error?: string }> {
+  try {
+    await postalSend({
+      to:       [opts.to],
+      from:     `ERA Systems <${config.email.from}>`,
+      subject:  opts.subject,
+      htmlBody: opts.html,
+      textBody: opts.text,
+      tag:      'transactional',
+    })
+    return { sent: true }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log.error({ to: opts.to, subject: opts.subject, err: msg }, 'sendEmail failed')
+    return { sent: false, error: msg }
   }
-
-  log.info({ to: opts.to, subject: opts.subject, messageId: result.messageId }, 'Transactional email sent via Postal')
-  return true
 }
 
 // ── Pre-built templates ───────────────────────────────────────

@@ -99,7 +99,7 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
     postalMessageId = postalResult.messageId
   } else {
     // Postal not configured — fall back to SMTP
-    sent = await sendEmail({ to: email, subject, html })
+    sent = (await sendEmail({ to: email, subject, html })).sent
   }
 
   await adminDb`
