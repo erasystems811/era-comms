@@ -128,7 +128,18 @@ export class BaileysSession implements IWhatsAppSession {
       throw new SessionError(`Session ${this.sessionId} is not connected`)
     }
 
-    const jid = jidNormalizedUser(`${to.replace(/^\+/, '')}@s.whatsapp.net`)
+    const rawNumber = to.replace(/^\+/, '')
+
+    // Verify the number is registered on WhatsApp before sending.
+    // Without this, Baileys can return a message ID for unregistered numbers
+    // and the message silently disappears — giving a false 'sent' status.
+    const waResult = await this.socket.onWhatsApp(rawNumber)
+    const waCheck = waResult?.[0]
+    if (!waCheck?.exists) {
+      throw new SessionError(`${to} is not registered on WhatsApp`)
+    }
+
+    const jid = waCheck.jid ?? jidNormalizedUser(`${rawNumber}@s.whatsapp.net`)
     const result = await this.socket.sendMessage(jid, { text: content })
 
     if (!result?.key?.id) {

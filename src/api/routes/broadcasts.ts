@@ -116,26 +116,36 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
 
     const broadcastId = rows[0]!.id
 
-    // Insert recipients if provided
+    // Insert ALL recipients — invalid format goes in as 'failed' immediately so
+    // they are visible in the panel rather than being silently dropped.
     const submitted = body.recipients?.length ?? 0
-    let validCount = 0
+    let invalidCount = 0
     if (body.recipients && body.recipients.length > 0) {
-      const valid = body.recipients.filter(r => E164_RE.test(r.phoneNumber))
-      validCount = valid.length
-      for (const r of valid) {
-        await adminDb`
-          INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name)
-          VALUES (${broadcastId}, ${body.clientId}, ${r.phoneNumber}, ${r.name ?? null})
-          ON CONFLICT DO NOTHING
-        `
+      for (const r of body.recipients) {
+        if (E164_RE.test(r.phoneNumber)) {
+          await adminDb`
+            INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name)
+            VALUES (${broadcastId}, ${body.clientId}, ${r.phoneNumber}, ${r.name ?? null})
+            ON CONFLICT DO NOTHING
+          `
+        } else {
+          await adminDb`
+            INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name, status, error)
+            VALUES (${broadcastId}, ${body.clientId}, ${r.phoneNumber}, ${r.name ?? null},
+                    'failed', 'Invalid phone number format — include country code, e.g. +2348012345678')
+            ON CONFLICT DO NOTHING
+          `
+          invalidCount++
+        }
       }
-      // Update count to reflect only valid numbers
       await adminDb`
-        UPDATE whatsapp_broadcasts SET total_recipients = ${valid.length} WHERE id = ${broadcastId}
+        UPDATE whatsapp_broadcasts
+        SET total_recipients = ${submitted}, total_failed = ${invalidCount}
+        WHERE id = ${broadcastId}
       `
     }
 
-    const invalidRecipients = submitted - validCount
+    const invalidRecipients = invalidCount
 
     await auditLog(
       'broadcast.created',
@@ -221,18 +231,32 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
     }
 
     if (body.recipients !== undefined) {
-      // Replace all recipients
+      // Replace all recipients — invalid format goes in as 'failed', not silently dropped
       await adminDb`DELETE FROM broadcast_recipients WHERE broadcast_id = ${id}`
-      const valid = body.recipients.filter(r => E164_RE.test(r.phoneNumber))
-      for (const r of valid) {
-        await adminDb`
-          INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name)
-          VALUES (${id}, ${bc[0].client_id}, ${r.phoneNumber}, ${r.name ?? null})
-          ON CONFLICT DO NOTHING
-        `
+      let editInvalid = 0
+      for (const r of body.recipients) {
+        if (E164_RE.test(r.phoneNumber)) {
+          await adminDb`
+            INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name)
+            VALUES (${id}, ${bc[0].client_id}, ${r.phoneNumber}, ${r.name ?? null})
+            ON CONFLICT DO NOTHING
+          `
+        } else {
+          await adminDb`
+            INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name, status, error)
+            VALUES (${id}, ${bc[0].client_id}, ${r.phoneNumber}, ${r.name ?? null},
+                    'failed', 'Invalid phone number format — include country code, e.g. +2348012345678')
+            ON CONFLICT DO NOTHING
+          `
+          editInvalid++
+        }
       }
-      await adminDb`UPDATE whatsapp_broadcasts SET total_recipients = ${valid.length}, updated_at = NOW() WHERE id = ${id}`
-      updates.push(`recipients(${valid.length})`)
+      await adminDb`
+        UPDATE whatsapp_broadcasts
+        SET total_recipients = ${body.recipients.length}, total_failed = ${editInvalid}, updated_at = NOW()
+        WHERE id = ${id}
+      `
+      updates.push(`recipients(${body.recipients.length})`)
     }
 
     const finalName = body.name?.trim() ?? bc[0].name
@@ -267,22 +291,42 @@ const broadcastRoutes: FastifyPluginAsync = async (app) => {
       return reply.status(400).send({ error: 'VALIDATION_ERROR', message: 'recipients array is required' })
     }
 
+    // Insert ALL recipients — invalid format goes in as 'failed', not silently skipped
     let added = 0
+    let addedInvalid = 0
     for (const r of body.recipients) {
-      if (!E164_RE.test(r.phoneNumber)) continue
-      await adminDb`
-        INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name)
-        VALUES (${id}, ${bc[0].client_id}, ${r.phoneNumber}, ${r.name ?? null})
-        ON CONFLICT DO NOTHING
-      `
-      added++
+      if (E164_RE.test(r.phoneNumber)) {
+        await adminDb`
+          INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name)
+          VALUES (${id}, ${bc[0].client_id}, ${r.phoneNumber}, ${r.name ?? null})
+          ON CONFLICT DO NOTHING
+        `
+        added++
+      } else {
+        await adminDb`
+          INSERT INTO broadcast_recipients (broadcast_id, client_id, phone_number, name, status, error)
+          VALUES (${id}, ${bc[0].client_id}, ${r.phoneNumber}, ${r.name ?? null},
+                  'failed', 'Invalid phone number format — include country code, e.g. +2348012345678')
+          ON CONFLICT DO NOTHING
+        `
+        addedInvalid++
+      }
     }
 
-    type CountRow = { total: string }
-    const cnt = (await adminDb`SELECT COUNT(*)::text AS total FROM broadcast_recipients WHERE broadcast_id = ${id}`) as unknown as CountRow[]
-    await adminDb`UPDATE whatsapp_broadcasts SET total_recipients = ${parseInt(cnt[0]?.total ?? '0', 10)} WHERE id = ${id}`
+    type CountRow = { total: string; failed: string }
+    const cnt = (await adminDb`
+      SELECT COUNT(*)::text AS total,
+             COUNT(*) FILTER (WHERE status = 'failed')::text AS failed
+      FROM broadcast_recipients WHERE broadcast_id = ${id}
+    `) as unknown as CountRow[]
+    await adminDb`
+      UPDATE whatsapp_broadcasts
+      SET total_recipients = ${parseInt(cnt[0]?.total ?? '0', 10)},
+          total_failed     = ${parseInt(cnt[0]?.failed ?? '0', 10)}
+      WHERE id = ${id}
+    `
 
-    return reply.send({ added, invalid: body.recipients.length - added })
+    return reply.send({ added, invalid: addedInvalid })
   })
 
   // ── POST /broadcasts/:id/send — start sending ─────────────────
