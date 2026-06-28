@@ -104,6 +104,20 @@ function mapModuleConfig(mod: {
 
 const businessRoutes: FastifyPluginAsync = async (app) => {
 
+  // Re-check client status on every authenticated request so that
+  // suspension takes effect immediately, even for active JWT sessions.
+  app.addHook('preHandler', async (req, reply) => {
+    const auth = req.headers['authorization']
+    if (typeof auth !== 'string' || !auth.startsWith('Bearer ')) return
+    const payload = verifyJwt(auth.slice(7))
+    if (!payload) return
+    type StatusRow = { status: string }
+    const rows = (await adminDb`SELECT status FROM clients WHERE id = ${payload.clientId}`) as unknown as StatusRow[]
+    if (rows[0]?.status !== 'active') {
+      return reply.status(403).send({ error: 'ACCOUNT_SUSPENDED', message: 'This account has been suspended. Contact support.' })
+    }
+  })
+
   // ── POST /auth/login ──────────────────────────────────────────
 
   app.post('/auth/login', async (req, reply) => {
