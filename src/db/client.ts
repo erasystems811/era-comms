@@ -2,13 +2,16 @@ import postgres from 'postgres'
 import { config } from '../shared/config.js'
 import { logger } from '../shared/logger.js'
 
-// Primary connection pool — used for all application queries
+// Primary connection pool — used for all application queries.
+// Cap to 5 to leave room for adminDb and session worker connections
+// when PgBouncer session mode is in use (pool_size typically ≤ 20).
+// Override with DATABASE_MAX_CONNECTIONS in .env if you need more.
 export const db = postgres(config.db.url, {
-  max: config.db.maxConnections,
+  max: Math.min(config.db.maxConnections, 5),
   idle_timeout: 30,
   connect_timeout: 30,
   onnotice: (notice) => {
-    logger.debug({ notice }, 'PostgreSQL notice')
+    logger.debug({ notice }, 'Supabase notice')
   },
 })
 
@@ -17,19 +20,23 @@ export const db = postgres(config.db.url, {
 // RLS policies allow full cross-client visibility.
 export const ADMIN_SENTINEL = '00000000-0000-0000-0000-000000000001'
 
+// Session worker child processes need minimal DB connections.
+// Each worker is its own process and creates this pool independently.
+const isSessionWorker = process.argv.some((arg) => arg.includes('session-worker'))
+
 // Admin connection pool — sees across all clients via the sentinel GUC.
 // Access is enforced at the application layer via OPERATOR_SECRET; the DB
 // layer enforces it via is_admin_context() inside each RLS policy.
 // No BYPASSRLS or superuser role required.
 export const adminDb = postgres(config.db.url, {
-  max: 5,
+  max: isSessionWorker ? 1 : 2,
   idle_timeout: 30,
   connect_timeout: 30,
   connection: {
     'app.current_client_id': ADMIN_SENTINEL,
   },
   onnotice: (notice) => {
-    logger.debug({ notice }, 'PostgreSQL notice')
+    logger.debug({ notice }, 'Supabase notice')
   },
 })
 

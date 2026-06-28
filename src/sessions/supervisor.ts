@@ -21,6 +21,17 @@ import type {
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
+// Track all active child processes at module level so they can be killed
+// synchronously when the parent exits (tsx watch hot-reloads on Windows do
+// not kill child processes automatically — they survive and hold DB connections).
+const trackedWorkers = new Set<ChildProcess>()
+
+process.on('exit', () => {
+  for (const proc of trackedWorkers) {
+    try { proc.kill() } catch {}
+  }
+})
+
 // Backoff config for crashed session restarts
 const BACKOFF_BASE_MS = 2_000
 const BACKOFF_MAX_MS = 120_000
@@ -235,27 +246,41 @@ export class SessionSupervisor implements ISessionSupervisor {
   // ── PRIVATE ───────────────────────────────────────────────────
 
   private spawnWorker(sessionId: string): ChildProcess {
-    const isProduction = config.isProduction
+    // Detect tsx by checking if the current entry point is a .ts file.
+    // This works regardless of NODE_ENV — production on Termux runs compiled
+    // .js via `node dist/index.js`; dev on any machine runs `tsx src/index.ts`.
+    const runningTs = process.argv[1]?.endsWith('.ts') ?? false
 
     let cmd: string
     let args: string[]
 
-    if (isProduction) {
+    if (runningTs) {
+      const tsxBin = resolve(process.cwd(), 'node_modules', '.bin', 'tsx')
+      const workerPath = resolve(process.cwd(), 'src', 'sessions', 'session-worker.ts')
+      if (process.platform === 'win32') {
+        // On Windows, .bin/tsx is a POSIX shell script; use tsx.cmd via cmd.exe
+        // to avoid needing shell:true (which doesn't escape args properly).
+        cmd = 'cmd.exe'
+        args = ['/c', `${tsxBin}.cmd`, workerPath, sessionId]
+      } else {
+        cmd = tsxBin
+        args = [workerPath, sessionId]
+      }
+    } else {
       const workerPath = resolve(__dirname, 'session-worker.js')
       cmd = process.execPath
       args = [workerPath, sessionId]
-    } else {
-      // Development: use tsx to run TypeScript directly
-      const txsBin = resolve(process.cwd(), 'node_modules', '.bin', 'tsx')
-      const workerPath = resolve(process.cwd(), 'src', 'sessions', 'session-worker.ts')
-      cmd = txsBin
-      args = [workerPath, sessionId]
     }
 
-    return spawn(cmd, args, {
+    const proc = spawn(cmd, args, {
       stdio: 'inherit',
       env: process.env as NodeJS.ProcessEnv,
     })
+
+    trackedWorkers.add(proc)
+    proc.once('exit', () => trackedWorkers.delete(proc))
+
+    return proc
   }
 
   private async handleStatusUpdate(update: SessionStatusUpdate): Promise<void> {

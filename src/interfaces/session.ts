@@ -83,7 +83,7 @@ export interface IWhatsAppSession {
   getStatus(): SessionStatus
 
   // Device fingerprint that must be preserved and restored on reconnect.
-  // The session supervisor persists this to PostgreSQL after every change.
+  // The session supervisor persists this to Supabase after every change.
   getDeviceFingerprint(): Record<string, unknown> | null
 }
 
@@ -104,7 +104,7 @@ export interface SessionHealth {
 
 export interface ISessionSupervisor {
   // Start a session process for the given session ID.
-  // Loads credentials from PostgreSQL, warms Redis cache, spawns process.
+  // Loads credentials from Supabase, warms Redis cache, spawns process.
   startSession(sessionId: string): Promise<void>
 
   // Gracefully stop a session process.

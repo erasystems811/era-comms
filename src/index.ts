@@ -21,7 +21,7 @@ async function main(): Promise<void> {
   logger.info({ env: config.env }, 'ERA Comms starting')
 
   // Start the session supervisor — loads all non-banned sessions from
-  // PostgreSQL and spawns a worker process for each one.
+  // Supabase and spawns a worker process for each one.
   const supervisor = new SessionSupervisor()
   await supervisor.start()
 

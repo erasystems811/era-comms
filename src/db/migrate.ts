@@ -6,12 +6,12 @@ import postgres from 'postgres'
 
 const MIGRATIONS_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
-  '../../infra/postgres',
+  '../../infra/migrations',
 )
 
 // Split SQL source into individual statements so each one is sent as its own
 // simple query (autocommit). Sending all statements as a single query causes
-// PostgreSQL to wrap them in an implicit transaction, which forbids statements
+// Supabase to wrap them in an implicit transaction, which forbids statements
 // like CREATE MATERIALIZED VIEW WITH DATA and TimescaleDB continuous aggregates.
 //
 // Handles: dollar-quoted strings ($$...$$, $tag$...$tag$), single-quoted
@@ -138,7 +138,7 @@ async function migrate(): Promise<void> {
       const content = await readFile(join(MIGRATIONS_DIR, filename), 'utf-8')
 
       // Execute each statement individually so every one runs in autocommit
-      // mode — PostgreSQL forbids CREATE MATERIALIZED VIEW WITH DATA and
+      // mode — Supabase forbids CREATE MATERIALIZED VIEW WITH DATA and
       // TimescaleDB continuous aggregates inside any transaction block.
       const statements = splitStatements(content)
       for (const stmt of statements) {
