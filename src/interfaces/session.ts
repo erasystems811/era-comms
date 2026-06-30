@@ -21,13 +21,13 @@ export interface SendMessageResult {
   timestamp: Date
 }
 
-// QR stream emits one of five event shapes until the session connects
+// QR stream emits one of four event shapes until the session connects
 export type QREvent =
   | { type: 'qr'; code: string }         // new QR code, render and display
   | { type: 'connected' }                // session authenticated, QR no longer needed
   | { type: 'error'; reason: string }    // unrecoverable error during QR flow
   | { type: 'restart' }                  // WhatsApp 515 — worker must restart cleanly
-  | { type: 'logged_out' }              // WhatsApp revoked credentials — worker will restart with fresh QR
+  | { type: 'logged_out' }              // WhatsApp revoked session — fresh QR needed
 
 export interface SessionProfile {
   name?: string | null
@@ -68,11 +68,6 @@ export interface IWhatsAppSession {
   // Register a callback that fires once when the session successfully connects.
   onConnected(handler: () => Promise<void>): void
 
-  // Register a handler for WhatsApp delivery receipts.
-  // Called when WhatsApp confirms a message was delivered or read.
-  // statusCode: 3 = delivered to device, 4 = read by recipient.
-  onReceipt(handler: (waMessageId: string, statusCode: number) => Promise<void>): void
-
   // Push WhatsApp Business profile fields to the connected account.
   applyProfile(profile: SessionProfile): Promise<void>
 
@@ -83,7 +78,7 @@ export interface IWhatsAppSession {
   getStatus(): SessionStatus
 
   // Device fingerprint that must be preserved and restored on reconnect.
-  // The session supervisor persists this to Supabase after every change.
+  // The session supervisor persists this to PostgreSQL after every change.
   getDeviceFingerprint(): Record<string, unknown> | null
 }
 
@@ -104,7 +99,7 @@ export interface SessionHealth {
 
 export interface ISessionSupervisor {
   // Start a session process for the given session ID.
-  // Loads credentials from Supabase, warms Redis cache, spawns process.
+  // Loads credentials from PostgreSQL, warms Redis cache, spawns process.
   startSession(sessionId: string): Promise<void>
 
   // Gracefully stop a session process.

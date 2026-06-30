@@ -27,11 +27,11 @@ import { KEY } from '../queues/definitions.js'
 
 // ── CREDENTIAL PERSISTENCE ────────────────────────────────────
 //
-// Source of truth: Supabase (encrypted AES-256-GCM).
+// Source of truth: PostgreSQL (encrypted AES-256-GCM).
 // Fast path: Redis (plaintext JSON cache, acceptable to be cold).
 //
 // Losing Redis never causes a QR re-scan — the supervisor loads
-// credentials from Supabase on session start and warms the cache.
+// credentials from PostgreSQL on session start and warms the cache.
 // The worker then reads from Redis on every reconnect.
 //
 // Key state (pre-keys, sessions, sender-keys) is Redis-only.
@@ -48,7 +48,7 @@ export async function loadCredentials(
     return JSON.parse(cached, bufReviver) as AuthenticationState['creds']
   }
 
-  // Fall back to Supabase
+  // Fall back to PostgreSQL
   const rows = await adminDb<
     Array<{
       credentials_encrypted: string | null
@@ -95,8 +95,8 @@ export async function saveCredentials(
   const plaintext = JSON.stringify(creds, bufReplacer)
   const payload = encrypt(plaintext, config.encryption.sessionCredentialsKey)
 
-  // Write to Supabase (source of truth) and Redis cache atomically from
-  // the caller's perspective — Supabase write first so Redis is never ahead.
+  // Write to PostgreSQL (source of truth) and Redis cache atomically from
+  // the caller's perspective — PG write first so Redis is never ahead.
   await adminDb`
     UPDATE whatsapp_sessions
     SET credentials_encrypted  = ${payload.encrypted},
@@ -113,22 +113,16 @@ export async function clearCredentialCache(sessionId: string): Promise<void> {
   await redis.del(KEY.sessionCreds(sessionId))
 }
 
-// Wipes credentials from both Redis and Supabase so the next connect()
-// call generates a fresh QR. Used when WhatsApp logs out the session
-// (e.g. user tapped "Log out from all devices") so it can be re-paired
-// without needing to delete and recreate the session.
 export async function clearCredentials(sessionId: string): Promise<void> {
-  await Promise.all([
-    redis.del(KEY.sessionCreds(sessionId)),
-    adminDb`
-      UPDATE whatsapp_sessions
-      SET credentials_encrypted  = NULL,
-          credentials_iv         = NULL,
-          credentials_tag        = NULL,
-          credentials_updated_at = NOW()
-      WHERE id = ${sessionId}
-    `,
-  ])
+  await redis.del(KEY.sessionCreds(sessionId))
+  await adminDb`
+    UPDATE whatsapp_sessions
+    SET credentials_encrypted = NULL,
+        credentials_iv        = NULL,
+        credentials_tag       = NULL,
+        credentials_updated_at = NOW()
+    WHERE session_id = ${sessionId}
+  `
 }
 
 // ── BAILEYS AUTH STATE FACTORY ────────────────────────────────
