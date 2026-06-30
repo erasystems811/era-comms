@@ -1733,6 +1733,29 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     return reply.status(200).send({ received: true })
   })
 
+  // ── POST /v1/admin/test-email ───────────────────────────────
+  // Sends a test email and returns the full result including any error message.
+
+  app.post('/test-email', async (req, reply) => {
+    if (!assertOperator(req, reply)) return
+    const { to } = req.body as { to?: string }
+    if (!to) return reply.status(400).send({ error: 'to is required' })
+
+    const smtpConfigured = !!(config.email.smtpUser && config.email.smtpPass)
+    const result = await sendEmail({
+      to,
+      subject: 'ERA Comms — Test Email',
+      html:    '<p style="font-family:system-ui,sans-serif">This is a test email from ERA Comms. If you received this, email is working correctly.</p>',
+      text:    'This is a test email from ERA Comms. If you received this, email is working correctly.',
+    })
+
+    return reply.send({
+      smtpConfigured,
+      smtpUser: config.email.smtpUser ?? null,
+      result,
+    })
+  })
+
   // ── POST /v1/admin/notify ────────────────────────────────────
   // Cross-service notification endpoint (used by ERA Structure).
   // Sends a WhatsApp message via the operator's internal session and/or
