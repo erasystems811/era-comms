@@ -973,7 +973,6 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       to,
       content,
       contentType: 'text',
-      skipJitter:  true,
     })
 
     return reply.send({ ok: true, messageId: result.messageId })
@@ -1783,7 +1782,6 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
             to:          body.to,
             content:     body.message,
             contentType: 'text',
-            skipJitter:  true,
           })
           results.whatsapp = 'sent'
         } else {
