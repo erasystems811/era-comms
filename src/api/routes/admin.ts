@@ -1748,6 +1748,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
       subject?: string     // Email subject line
       message: string      // Plain-text message body (used for both channels)
       htmlMessage?: string // Optional HTML version for email
+      sessionId?: string   // Use this specific session directly (skips auto-discovery)
     }
 
     if (!body.message?.trim()) {
@@ -1768,24 +1769,41 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
     // ── WhatsApp ──────────────────────────────────────────────
     if (body.to) {
       try {
-        const internalClientId = config.monitoring.operatorInternalClientId
-        const sessions = (await adminDb`
-          SELECT id FROM whatsapp_sessions
-          WHERE  client_id = ${internalClientId} AND status = 'active'
-          ORDER  BY created_at ASC LIMIT 1
-        `) as unknown as Array<{ id: string }>
+        let sessionId: string | undefined
+        let clientId: string
 
-        if (sessions[0]) {
+        if (body.sessionId) {
+          // Direct session ID provided — look up its client
+          type SessionClientRow = { id: string; client_id: string; status: string }
+          const rows = (await adminDb`
+            SELECT id, client_id, status FROM whatsapp_sessions WHERE id = ${body.sessionId}
+          `) as unknown as SessionClientRow[]
+          if (!rows[0]) throw new Error(`Session ${body.sessionId} not found`)
+          if (rows[0].status !== 'active') throw new Error(`Session is not active (status: ${rows[0].status})`)
+          sessionId = rows[0].id
+          clientId  = rows[0].client_id
+        } else {
+          // Auto-discover from internal client
+          clientId = config.monitoring.operatorInternalClientId
+          const sessions = (await adminDb`
+            SELECT id FROM whatsapp_sessions
+            WHERE  client_id = ${clientId} AND status = 'active'
+            ORDER  BY created_at ASC LIMIT 1
+          `) as unknown as Array<{ id: string }>
+          sessionId = sessions[0]?.id
+        }
+
+        if (sessionId) {
           await sendMessage({
-            clientId:    internalClientId,
-            sessionId:   sessions[0].id,
+            clientId,
+            sessionId,
             to:          body.to,
             content:     body.message,
             contentType: 'text',
           })
           results.whatsapp = 'sent'
         } else {
-          req.log.warn({ to: body.to }, 'notify: no active internal session — WhatsApp skipped')
+          req.log.warn({ to: body.to }, 'notify: no active session found — WhatsApp skipped')
         }
       } catch (err) {
         req.log.error({ err, to: body.to }, 'notify: WhatsApp delivery failed')
