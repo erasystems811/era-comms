@@ -95,7 +95,7 @@ async function processCampaignJob(job: Job<EmailCampaignJob>): Promise<void> {
       listUnsubscribe: unsubUrl ?? undefined,
     })
     sent = true
-    postalMessageId = postalResult.messageId
+    postalMessageId = postalResult?.messageId ?? null
   } catch (postalErr) {
     log.warn({ campaignId, email, err: postalErr }, 'Postal send failed — falling back to transactional sendEmail')
     sent = (await sendEmail({ to: email, subject, html })).sent

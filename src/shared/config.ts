@@ -36,7 +36,9 @@ const schema = z.object({
 
   EMAIL_FROM: z.preprocess(v => (typeof v === 'string' ? v.trim() : v), z.string().optional().default('noreply@erasystems.com.ng')),
 
-  // Gmail SMTP — transactional email (approvals, API keys, notifications)
+  // Resend — transactional email via HTTPS API (Railway-friendly, no SMTP port blocks)
+  RESEND_API_KEY: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
+  // Gmail SMTP — fallback if Resend not configured
   SMTP_USER: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
   SMTP_PASS: z.preprocess(v => (v === '' ? undefined : v), z.string().optional()),
 
@@ -111,6 +113,7 @@ export const config = Object.freeze({
 
   email: {
     from:                env.EMAIL_FROM ?? 'noreply@erasystems.com.ng',
+    resendApiKey:        env.RESEND_API_KEY,
     smtpUser:            env.SMTP_USER,
     smtpPass:            env.SMTP_PASS,
     postalServerUrl:     env.POSTAL_SERVER_URL,

@@ -1,7 +1,15 @@
+import { Resend } from 'resend'
 import nodemailer from 'nodemailer'
 import { postalSend } from '../services/postal.js'
 import { config } from './config.js'
 import { logger } from './logger.js'
+
+let _resend: Resend | null = null
+function getResend(): Resend | null {
+  if (!config.email.resendApiKey) return null
+  if (!_resend) _resend = new Resend(config.email.resendApiKey)
+  return _resend
+}
 
 const log = logger.child({ component: 'email' })
 
@@ -32,10 +40,33 @@ function getTransporter(): nodemailer.Transporter | null {
 }
 
 export async function sendEmail(opts: EmailOptions): Promise<{ sent: boolean; error?: string }> {
-  const transporter = getTransporter()
+  // 1. Try Resend first (HTTPS API — works on Railway, no port blocks)
+  const resend = getResend()
+  if (resend) {
+    try {
+      const { error } = await resend.emails.send({
+        from:    `ERA Systems <${config.email.from}>`,
+        to:      opts.to,
+        subject: opts.subject,
+        html:    opts.html,
+        text:    opts.text,
+      })
+      if (error) {
+        log.error({ to: opts.to, subject: opts.subject, err: error.message }, 'Resend failed')
+        return { sent: false, error: error.message }
+      }
+      log.info({ to: opts.to, subject: opts.subject }, 'Email sent via Resend')
+      return { sent: true }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      log.error({ to: opts.to, subject: opts.subject, err: msg }, 'Resend threw')
+      return { sent: false, error: msg }
+    }
+  }
 
+  // 2. Fall back to Gmail SMTP
+  const transporter = getTransporter()
   if (transporter) {
-    // Gmail SMTP — transactional emails
     try {
       await transporter.sendMail({
         from:    `ERA Systems <${config.email.smtpUser}>`,
@@ -53,7 +84,7 @@ export async function sendEmail(opts: EmailOptions): Promise<{ sent: boolean; er
     }
   }
 
-  // Fall back to Postal if Gmail SMTP is not configured
+  // 3. Fall back to Postal
   try {
     await postalSend({
       to:       [opts.to],
@@ -66,7 +97,7 @@ export async function sendEmail(opts: EmailOptions): Promise<{ sent: boolean; er
     return { sent: true }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    log.error({ to: opts.to, subject: opts.subject, err: msg }, 'sendEmail failed')
+    log.error({ to: opts.to, subject: opts.subject, err: msg }, 'sendEmail: all transports failed')
     return { sent: false, error: msg }
   }
 }
