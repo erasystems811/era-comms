@@ -1802,7 +1802,7 @@ const adminRoutes: FastifyPluginAsync = async (app) => {
           html:    body.htmlMessage ?? `<p style="font-family:system-ui,sans-serif">${body.message.replace(/\n/g, '<br>')}</p>`,
           text:    body.message,
         })
-        results.email = sent ? 'sent' : 'failed'
+        results.email = (typeof sent === 'object' ? sent.sent : sent) ? 'sent' : 'failed'
       } catch (err) {
         req.log.error({ err, email: body.email }, 'notify: email delivery failed')
         results.email = 'failed'
